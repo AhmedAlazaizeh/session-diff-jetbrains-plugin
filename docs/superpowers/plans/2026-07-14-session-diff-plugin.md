@@ -54,11 +54,11 @@ dependencyResolutionManagement {
 
 - [ ] **Step 2: Write `build.gradle.kts`**
 
-No `repositories {}` block here — `FAIL_ON_PROJECT_REPOS` above means repositories are only ever declared in `settings.gradle.kts`; declaring any in `build.gradle.kts` fails the build. The `org.jetbrains.intellij.platform` plugin needs no explicit version — it's resolved via the settings plugin applied above. Use `intellijIdea(...)`, not `intellijIdeaCommunity(...)` — the latter was removed by the platform since 2025.3 and fails dependency resolution. No `bundledPlugin("com.intellij.diff")` either — diff APIs (`DiffManager`, `DiffContentFactory`, used starting Task 5) are part of the base platform, not a separate bundled plugin; declaring one with that ID fails with "Could not find bundled plugin."
+No `repositories {}` block here — `FAIL_ON_PROJECT_REPOS` above means repositories are only ever declared in `settings.gradle.kts`; declaring any in `build.gradle.kts` fails the build. The `org.jetbrains.intellij.platform` plugin needs no explicit version — it's resolved via the settings plugin applied above. Use `intellijIdea(...)`, not `intellijIdeaCommunity(...)` — the latter was removed by the platform since 2025.3 and fails dependency resolution. No `bundledPlugin("com.intellij.diff")` either — diff APIs (`DiffManager`, `DiffContentFactory`, used starting Task 5) are part of the base platform, not a separate bundled plugin; declaring one with that ID fails with "Could not find bundled plugin." Kotlin Gradle plugin must be `2.3.0`, not `2.1.20` — IDEA 2026.1's bundled platform jars carry Kotlin metadata compiled with 2.3.0, and the 2.1.20 compiler can't read it ("compiled with an incompatible version of Kotlin"), so any real compilation against the platform jars fails (this didn't surface in Task 1 because zero Kotlin sources existed yet — `NO-SOURCE` skips compilation entirely).
 
 ```kotlin
 plugins {
-    kotlin("jvm") version "2.1.20"
+    kotlin("jvm") version "2.3.0"
     id("org.jetbrains.intellij.platform")
 }
 
@@ -155,6 +155,7 @@ package com.progressoft.sessiondiff
 import com.google.gson.JsonParser
 import com.google.gson.JsonSyntaxException
 import java.io.File
+import java.nio.file.Path
 import java.time.Instant
 import kotlin.io.path.Path
 import kotlin.io.path.listDirectoryEntries
