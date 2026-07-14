@@ -54,7 +54,7 @@ dependencyResolutionManagement {
 
 - [ ] **Step 2: Write `build.gradle.kts`**
 
-No `repositories {}` block here — `FAIL_ON_PROJECT_REPOS` above means repositories are only ever declared in `settings.gradle.kts`; declaring any in `build.gradle.kts` fails the build. The `org.jetbrains.intellij.platform` plugin needs no explicit version — it's resolved via the settings plugin applied above.
+No `repositories {}` block here — `FAIL_ON_PROJECT_REPOS` above means repositories are only ever declared in `settings.gradle.kts`; declaring any in `build.gradle.kts` fails the build. The `org.jetbrains.intellij.platform` plugin needs no explicit version — it's resolved via the settings plugin applied above. Use `intellijIdea(...)`, not `intellijIdeaCommunity(...)` — the latter was removed by the platform since 2025.3 and fails dependency resolution. No `bundledPlugin("com.intellij.diff")` either — diff APIs (`DiffManager`, `DiffContentFactory`, used starting Task 5) are part of the base platform, not a separate bundled plugin; declaring one with that ID fails with "Could not find bundled plugin."
 
 ```kotlin
 plugins {
@@ -64,8 +64,7 @@ plugins {
 
 dependencies {
     intellijPlatform {
-        intellijIdeaCommunity("2026.1")
-        bundledPlugin("com.intellij.diff")
+        intellijIdea("2026.1")
     }
 }
 
@@ -94,7 +93,6 @@ pluginVersion=0.1.0
   <idea-version since-build="261"/>
 
   <depends>com.intellij.modules.platform</depends>
-  <depends>com.intellij.diff</depends>
 
   <extensions defaultExtensionNs="com.intellij">
     <toolWindow id="Claude Sessions"

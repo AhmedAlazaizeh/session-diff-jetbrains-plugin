@@ -5,8 +5,7 @@ plugins {
 
 dependencies {
     intellijPlatform {
-        intellijIdeaCommunity("2026.1")
-        bundledPlugin("com.intellij.diff")
+        intellijIdea("2026.1")
     }
 }
 
