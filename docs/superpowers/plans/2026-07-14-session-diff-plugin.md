@@ -22,7 +22,11 @@ Deliberate scope decision from the design spec (`docs/superpowers/specs/2026-07-
 
 - [ ] **Step 1: Write `settings.gradle.kts`**
 
+Verified against the official `JetBrains/intellij-platform-plugin-template` repo — the `import` line and the `foojay-resolver-convention` plugin are both required, not optional boilerplate; without the import, `intellijPlatform{}` below is an unresolved reference.
+
 ```kotlin
+import org.jetbrains.intellij.platform.gradle.extensions.intellijPlatform
+
 rootProject.name = "session-diff"
 
 pluginManagement {
@@ -30,6 +34,11 @@ pluginManagement {
         gradlePluginPortal()
         mavenCentral()
     }
+}
+
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+    id("org.jetbrains.intellij.platform.settings") version "2.16.0"
 }
 
 dependencyResolutionManagement {
@@ -45,17 +54,12 @@ dependencyResolutionManagement {
 
 - [ ] **Step 2: Write `build.gradle.kts`**
 
+No `repositories {}` block here — `FAIL_ON_PROJECT_REPOS` above means repositories are only ever declared in `settings.gradle.kts`; declaring any in `build.gradle.kts` fails the build. The `org.jetbrains.intellij.platform` plugin needs no explicit version — it's resolved via the settings plugin applied above.
+
 ```kotlin
 plugins {
-    id("org.jetbrains.intellij.platform") version "2.2.1"
-    kotlin("jvm") version "2.0.20"
-}
-
-repositories {
-    mavenCentral()
-    intellijPlatform {
-        defaultRepositories()
-    }
+    kotlin("jvm") version "2.1.20"
+    id("org.jetbrains.intellij.platform")
 }
 
 dependencies {
@@ -101,15 +105,24 @@ pluginVersion=0.1.0
 </idea-plugin>
 ```
 
-- [ ] **Step 5: Verify Gradle itself is configured correctly**
+- [ ] **Step 5: Bootstrap the Gradle wrapper**
 
-Run: `./gradlew help`
-Expected: lists standard tasks including `buildPlugin`, `runIde` — confirms the IntelliJ Platform Gradle plugin applied correctly. (`buildPlugin` isn't run yet — `plugin.xml` references `SessionListToolWindowFactory`, which doesn't exist until Task 3, so a full build would fail until then.)
-
-- [ ] **Step 6: Commit**
+A fresh repo has no `./gradlew` yet — it must be generated once using a system-installed Gradle. If `gradle` isn't on PATH, install it via SDKMAN (`sdk install gradle 9.6.1`, source `~/.sdkman/bin/sdkman-init.sh` first if needed).
 
 ```bash
-git add settings.gradle.kts build.gradle.kts gradle.properties src/main/resources/META-INF/plugin.xml
+gradle wrapper --gradle-version 9.6.1
+```
+Expected: `BUILD SUCCESSFUL`; creates `gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`, `gradle/wrapper/gradle-wrapper.properties`. These get committed to the repo like any other project file — that's the standard, expected Gradle wrapper convention.
+
+- [ ] **Step 6: Verify Gradle itself is configured correctly**
+
+Run: `./gradlew help`
+Expected: `BUILD SUCCESSFUL`. Then run `./gradlew tasks | grep -E "buildPlugin|runIde"` — expected output lists both `buildPlugin` and `runIde`, confirming the IntelliJ Platform Gradle plugin applied correctly. (`buildPlugin` isn't run yet — `plugin.xml` references `SessionListToolWindowFactory`, which doesn't exist until Task 3, so a full build would fail until then.)
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add settings.gradle.kts build.gradle.kts gradle.properties src/main/resources/META-INF/plugin.xml gradlew gradlew.bat gradle/
 git commit -m "chore: scaffold Gradle IntelliJ Platform plugin project"
 ```
 
