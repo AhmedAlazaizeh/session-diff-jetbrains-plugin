@@ -181,10 +181,43 @@ object SessionDiscoveryService {
             .sortedByDescending { it.startTimeMillis }
     }
 
+    /**
+     * Every absolute path touched by an Edit/Write/NotebookEdit tool_use in this transcript.
+     * Shared by [parseTranscript] (needs only the count) and [DiffPresenter] (needs the actual paths) —
+     * a single parsing pass so the two callers can't silently drift if the transcript shape ever changes.
+     * (Originally duplicated inline in both places; consolidated here after Task 5's code review flagged
+     * the duplication as a drift risk.)
+     */
+    fun touchedFilesIn(transcriptPath: Path): Set<String> {
+        val touched = mutableSetOf<String>()
+        File(transcriptPath.toString()).forEachLine { line ->
+            if (line.isBlank()) return@forEachLine
+            val obj = try {
+                JsonParser.parseString(line).asJsonObject
+            } catch (e: JsonSyntaxException) {
+                return@forEachLine
+            } catch (e: IllegalStateException) {
+                return@forEachLine
+            }
+            val message = obj.getAsJsonObject("message") ?: return@forEachLine
+            val content = message.getAsJsonArray("content") ?: return@forEachLine
+            for (block in content) {
+                if (!block.isJsonObject) continue
+                val blockObj = block.asJsonObject
+                if (blockObj.get("type")?.asString != "tool_use") continue
+                val name = blockObj.get("name")?.asString ?: continue
+                if (name !in TOOL_NAMES_WITH_FILE) continue
+                val input = blockObj.getAsJsonObject("input") ?: continue
+                val filePath = input.get("file_path")?.asString ?: input.get("notebook_path")?.asString
+                if (filePath != null) touched.add(filePath)
+            }
+        }
+        return touched
+    }
+
     private fun parseTranscript(path: Path): SessionInfo? {
         var sessionId: String? = null
         var minTimestampMillis: Long? = null
-        val touchedFiles = mutableSetOf<String>()
 
         File(path.toString()).forEachLine { line ->
             if (line.isBlank()) return@forEachLine
@@ -210,23 +243,11 @@ object SessionDiscoveryService {
                     minTimestampMillis = millis
                 }
             }
-
-            val message = obj.getAsJsonObject("message") ?: return@forEachLine
-            val content = message.getAsJsonArray("content") ?: return@forEachLine
-            for (block in content) {
-                if (!block.isJsonObject) continue
-                val blockObj = block.asJsonObject
-                if (blockObj.get("type")?.asString != "tool_use") continue
-                val name = blockObj.get("name")?.asString ?: continue
-                if (name !in TOOL_NAMES_WITH_FILE) continue
-                val input = blockObj.getAsJsonObject("input") ?: continue
-                val filePath = input.get("file_path")?.asString ?: input.get("notebook_path")?.asString
-                if (filePath != null) touchedFiles.add(filePath)
-            }
         }
 
         val id = sessionId ?: path.fileName.toString().removeSuffix(".jsonl")
         val startTime = minTimestampMillis ?: return null
+        val touchedFiles = touchedFilesIn(path)
         if (touchedFiles.isEmpty()) return null
 
         return SessionInfo(
@@ -543,10 +564,11 @@ object BashWarningDetector {
 
 - [ ] **Step 2: Write `DiffPresenter.kt`**
 
+Uses `DiffContentFactory.createFromBytes(...)`, not `String(bytes)` + `create(...)` — `String(ByteArray)` decodes using the JVM's platform-default charset, which silently mis-renders any file that isn't in that charset (non-ASCII content, legacy encodings). `createFromBytes` does its own charset detection from the actual bytes, the same way the editor does. Also calls the shared `SessionDiscoveryService.touchedFilesIn(...)` from Task 2 instead of duplicating that parsing logic locally — the original draft had its own private `touchedFilesFor`, byte-for-byte identical to `SessionDiscoveryService`'s scan; consolidated after code review flagged the duplicate-parsing drift risk.
+
 ```kotlin
 package com.progressoft.sessiondiff
 
-import com.google.gson.JsonParser
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
 import com.intellij.diff.chains.SimpleDiffRequestChain
@@ -556,6 +578,7 @@ import com.intellij.notification.NotificationType
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.project.Project
 import java.io.File
+import java.io.IOException
 import java.nio.file.Path
 import kotlin.io.path.Path
 
@@ -563,7 +586,7 @@ object DiffPresenter {
 
     fun showDiffForSession(project: Project, session: SessionInfo) {
         val projectBasePath = project.basePath ?: return
-        val touchedFiles = touchedFilesFor(session)
+        val touchedFiles = SessionDiscoveryService.touchedFilesIn(session.transcriptPath)
         if (touchedFiles.isEmpty()) return
 
         val untrackedWarnings = mutableListOf<String>()
@@ -592,10 +615,15 @@ object DiffPresenter {
 
             val fileType = FileTypeManager.getInstance().getFileTypeByFileName(currentFile.name)
             val diffContentFactory = DiffContentFactory.getInstance()
-            val beforeContent = diffContentFactory.create(project, String(beforeBytes), fileType)
-            val afterContent = diffContentFactory.create(project, String(afterBytes), fileType)
+            val diffContent = try {
+                val before = diffContentFactory.createFromBytes(project, beforeBytes, fileType, "before/$relpath")
+                val after = diffContentFactory.createFromBytes(project, afterBytes, fileType, "after/$relpath")
+                before to after
+            } catch (e: IOException) {
+                continue // couldn't materialize this file's content — skip it, don't fail the whole session diff
+            }
 
-            requests.add(SimpleDiffRequest(relpath, beforeContent, afterContent, "Before", "After"))
+            requests.add(SimpleDiffRequest(relpath, diffContent.first, diffContent.second, "Before", "After"))
         }
 
         if (untrackedWarnings.isNotEmpty()) {
@@ -624,31 +652,6 @@ object DiffPresenter {
         if (requests.isEmpty()) return
         val chain = SimpleDiffRequestChain(requests)
         DiffManager.getInstance().showDiff(project, chain, com.intellij.diff.DiffDialogHints.DEFAULT)
-    }
-
-    private fun touchedFilesFor(session: SessionInfo): Set<String> {
-        val touched = mutableSetOf<String>()
-        File(session.transcriptPath.toString()).forEachLine { line ->
-            if (line.isBlank()) return@forEachLine
-            val obj = try {
-                JsonParser.parseString(line).asJsonObject
-            } catch (e: Exception) {
-                return@forEachLine
-            }
-            val message = obj.getAsJsonObject("message") ?: return@forEachLine
-            val content = message.getAsJsonArray("content") ?: return@forEachLine
-            for (block in content) {
-                if (!block.isJsonObject) continue
-                val blockObj = block.asJsonObject
-                if (blockObj.get("type")?.asString != "tool_use") continue
-                val name = blockObj.get("name")?.asString ?: continue
-                if (name !in setOf("Edit", "Write", "NotebookEdit")) continue
-                val input = blockObj.getAsJsonObject("input") ?: continue
-                val filePath = input.get("file_path")?.asString ?: input.get("notebook_path")?.asString
-                if (filePath != null) touched.add(filePath)
-            }
-        }
-        return touched
     }
 }
 ```
