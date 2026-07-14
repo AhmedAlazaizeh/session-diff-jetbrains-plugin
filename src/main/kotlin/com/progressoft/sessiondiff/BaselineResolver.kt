@@ -3,8 +3,10 @@ package com.progressoft.sessiondiff
 import com.google.gson.JsonParser
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.Path
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
@@ -62,16 +64,31 @@ object BaselineResolver {
         return historyFile.readBytes()
     }
 
+    private fun isInsideGitWorkTree(projectBasePath: String): Boolean {
+        return try {
+            val process = ProcessBuilder("git", "-C", projectBasePath, "rev-parse", "--is-inside-work-tree").start()
+            val finished = process.waitFor(2, TimeUnit.SECONDS)
+            finished && process.exitValue() == 0
+        } catch (e: IOException) {
+            false
+        }
+    }
+
     private fun isGitUntracked(absolutePath: String, projectBasePath: String): Boolean {
+        if (!isInsideGitWorkTree(projectBasePath)) return false
         return try {
             val process = ProcessBuilder("git", "-C", projectBasePath, "status", "--porcelain=v1", "--", absolutePath)
                 .redirectErrorStream(false)
                 .start()
             val output = ByteArrayOutputStream()
             process.inputStream.copyTo(output)
-            process.waitFor()
+            val finished = process.waitFor(2, TimeUnit.SECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                return false
+            }
             output.toString().lines().any { it.startsWith("??") }
-        } catch (e: Exception) {
+        } catch (e: IOException) {
             false
         }
     }

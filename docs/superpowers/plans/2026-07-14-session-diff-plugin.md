@@ -362,14 +362,18 @@ git commit -m "feat: add Claude Sessions tool window with live refresh"
 
 - [ ] **Step 1: Write `BaselineResolver.kt`**
 
+`isGitUntracked` checks `git rev-parse --is-inside-work-tree` before running `git status`, matching `session-diff.py`'s `git_untracked()` — this keeps "not a git repo" (expected, return not-untracked cleanly) distinct from a genuinely broken git invocation, which the original blanket `catch (e: Exception)` would have collapsed into the same silent `Baseline.Missing` outcome with no warning at all. Both git subprocess calls use a 2-second `waitFor` timeout, since this runs synchronously on the UI click-handler path (`SessionListPanel` → `DiffPresenter` → `BaselineResolver`) — an unbounded `waitFor()` would hang the IDE if git ever stalled.
+
 ```kotlin
 package com.progressoft.sessiondiff
 
 import com.google.gson.JsonParser
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.Path
 import kotlin.io.path.exists
 import kotlin.io.path.readBytes
@@ -427,16 +431,31 @@ object BaselineResolver {
         return historyFile.readBytes()
     }
 
+    private fun isInsideGitWorkTree(projectBasePath: String): Boolean {
+        return try {
+            val process = ProcessBuilder("git", "-C", projectBasePath, "rev-parse", "--is-inside-work-tree").start()
+            val finished = process.waitFor(2, TimeUnit.SECONDS)
+            finished && process.exitValue() == 0
+        } catch (e: IOException) {
+            false
+        }
+    }
+
     private fun isGitUntracked(absolutePath: String, projectBasePath: String): Boolean {
+        if (!isInsideGitWorkTree(projectBasePath)) return false
         return try {
             val process = ProcessBuilder("git", "-C", projectBasePath, "status", "--porcelain=v1", "--", absolutePath)
                 .redirectErrorStream(false)
                 .start()
             val output = ByteArrayOutputStream()
             process.inputStream.copyTo(output)
-            process.waitFor()
+            val finished = process.waitFor(2, TimeUnit.SECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                return false
+            }
             output.toString().lines().any { it.startsWith("??") }
-        } catch (e: Exception) {
+        } catch (e: IOException) {
             false
         }
     }
