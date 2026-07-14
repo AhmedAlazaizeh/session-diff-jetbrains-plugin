@@ -1,0 +1,17 @@
+<idea-plugin>
+  <id>com.progressoft.sessiondiff</id>
+  <name>Claude Sessions</name>
+  <vendor>Ahmad Alazaizeh</vendor>
+  <description>Shows a diff of only what Claude Code changed in a session, in the native IDE diff viewer.</description>
+  <idea-version since-build="261"/>
+
+  <depends>com.intellij.modules.platform</depends>
+  <depends>com.intellij.diff</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <toolWindow id="Claude Sessions"
+                secondary="true"
+                anchor="left"
+                factoryClass="com.progressoft.sessiondiff.SessionListToolWindowFactory"/>
+  </extensions>
+</idea-plugin>
