@@ -10,6 +10,8 @@
 
 Deliberate scope decision from the design spec (`docs/superpowers/specs/2026-07-14-jetbrains-plugin-design.md`): no formal unit-test framework for this first pass. Verification is Gradle build success per task, plus a final manual checklist run via `./gradlew runIde`.
 
+**Execution order note:** Task numbers below reflect the spec's component order, not build-dependency order. Task 3 (tool window) calls `DiffPresenter.showDiffForSession(...)`, which isn't defined until Task 5 — implement in the order **1 → 2 → 4 → 5 → 3 → 6 → 7**, not numeric order, so nothing references a class that doesn't exist yet.
+
 ---
 
 ### Task 1: Gradle project scaffold
