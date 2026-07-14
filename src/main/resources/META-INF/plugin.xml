@@ -12,5 +12,6 @@
                 secondary="true"
                 anchor="left"
                 factoryClass="com.progressoft.sessiondiff.SessionListToolWindowFactory"/>
+    <notificationGroup id="Claude Sessions" displayType="BALLOON"/>
   </extensions>
 </idea-plugin>
