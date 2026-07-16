@@ -16,14 +16,14 @@ object BashWarningDetector {
             } catch (e: Exception) {
                 return@forEachLine
             }
-            val message = obj.getAsJsonObject("message") ?: return@forEachLine
-            val content = message.getAsJsonArray("content") ?: return@forEachLine
+            val message = obj.get("message")?.takeIf { it.isJsonObject }?.asJsonObject ?: return@forEachLine
+            val content = message.get("content")?.takeIf { it.isJsonArray }?.asJsonArray ?: return@forEachLine
             for (block in content) {
                 if (!block.isJsonObject) continue
                 val blockObj = block.asJsonObject
-                if (blockObj.get("type")?.asString != "tool_use") continue
-                if (blockObj.get("name")?.asString != "Bash") continue
-                val command = blockObj.getAsJsonObject("input")?.get("command")?.asString ?: continue
+                if (blockObj.get("type").jsonString() != "tool_use") continue
+                if (blockObj.get("name").jsonString() != "Bash") continue
+                val command = blockObj.get("input").jsonObject()?.get("command").jsonString() ?: continue
                 if (DESTRUCTIVE_BASH_RE.containsMatchIn(command)) warnings.add(command)
             }
         }

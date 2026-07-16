@@ -48,13 +48,13 @@ object BaselineResolver {
             } catch (e: Exception) {
                 return@forEachLine
             }
-            if (obj.get("type")?.asString != "file-history-snapshot") return@forEachLine
-            val tfb = obj.getAsJsonObject("snapshot")?.getAsJsonObject("trackedFileBackups") ?: return@forEachLine
-            val entry = tfb.getAsJsonObject(relpath) ?: return@forEachLine
-            val version = entry.get("version")?.asInt ?: return@forEachLine
+            if (obj.get("type").jsonString() != "file-history-snapshot") return@forEachLine
+            val tfb = obj.get("snapshot").jsonObject()?.get("trackedFileBackups").jsonObject() ?: return@forEachLine
+            val entry = tfb.get(relpath).jsonObject() ?: return@forEachLine
+            val version = entry.get("version").jsonInt() ?: return@forEachLine
             if (bestVersion == null || version < bestVersion!!) {
                 bestVersion = version
-                bestBackupFileName = entry.get("backupFileName")?.asString
+                bestBackupFileName = entry.get("backupFileName").jsonString()
             }
         }
 

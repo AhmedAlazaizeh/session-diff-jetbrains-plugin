@@ -1,8 +1,23 @@
 <idea-plugin>
   <id>com.progressoft.sessiondiff</id>
   <name>Claude Sessions</name>
-  <vendor>Ahmad Alazaizeh</vendor>
-  <description>Shows a diff of only what Claude Code changed in a session, in the native IDE diff viewer.</description>
+  <vendor email="ahmad.alazaizeh@progressoft.com">Ahmad Alazaizeh</vendor>
+  <description><![CDATA[
+    Shows exactly what <a href="https://claude.com/claude-code">Claude Code</a> changed in a session —
+    never mixed up with your own uncommitted edits.
+    <ul>
+      <li>Claude Sessions tool window: browse sessions for the current project as cards (title, date, files changed)</li>
+      <li>Per-file change list with +/- line stats, color-coded new/deleted files</li>
+      <li>Native IDE diff view for any file a session touched</li>
+      <li>Inline gutter markers for the latest session, with per-hunk Rollback</li>
+    </ul>
+    Independent of git — works even on files with no baseline in version control.
+  ]]></description>
+  <change-notes><![CDATA[
+    <ul>
+      <li>0.1.0: session cards with titles, per-file diff stats, native diff viewer, inline gutter markers with Rollback for the latest session</li>
+    </ul>
+  ]]></change-notes>
   <idea-version since-build="261"/>
 
   <depends>com.intellij.modules.platform</depends>
@@ -13,5 +28,6 @@
                 anchor="left"
                 factoryClass="com.progressoft.sessiondiff.SessionListToolWindowFactory"/>
     <notificationGroup id="Claude Sessions" displayType="BALLOON"/>
+    <editorFactoryListener implementation="com.progressoft.sessiondiff.LatestSessionGutterListener"/>
   </extensions>
 </idea-plugin>

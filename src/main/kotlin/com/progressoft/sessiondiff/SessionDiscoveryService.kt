@@ -43,16 +43,18 @@ object SessionDiscoveryService {
             } catch (e: IllegalStateException) {
                 return@forEachLine
             }
-            val message = obj.getAsJsonObject("message") ?: return@forEachLine
-            val content = message.getAsJsonArray("content") ?: return@forEachLine
+            val message = obj.get("message").jsonObject() ?: return@forEachLine
+            // content is a plain string for simple text messages, and only an array of
+            // blocks (tool_use/tool_result/etc.) for the rest — real transcripts mix both.
+            val content = message.get("content").jsonArray() ?: return@forEachLine
             for (block in content) {
                 if (!block.isJsonObject) continue
                 val blockObj = block.asJsonObject
-                if (blockObj.get("type")?.asString != "tool_use") continue
-                val name = blockObj.get("name")?.asString ?: continue
+                if (blockObj.get("type").jsonString() != "tool_use") continue
+                val name = blockObj.get("name").jsonString() ?: continue
                 if (name !in TOOL_NAMES_WITH_FILE) continue
-                val input = blockObj.getAsJsonObject("input") ?: continue
-                val filePath = input.get("file_path")?.asString ?: input.get("notebook_path")?.asString
+                val input = blockObj.get("input").jsonObject() ?: continue
+                val filePath = input.get("file_path").jsonString() ?: input.get("notebook_path").jsonString()
                 if (filePath != null) touched.add(filePath)
             }
         }
@@ -62,6 +64,8 @@ object SessionDiscoveryService {
     private fun parseTranscript(path: Path): SessionInfo? {
         var sessionId: String? = null
         var minTimestampMillis: Long? = null
+        var aiTitle: String? = null
+        var firstUserPrompt: String? = null
 
         File(path.toString()).forEachLine { line ->
             if (line.isBlank()) return@forEachLine
@@ -73,18 +77,27 @@ object SessionDiscoveryService {
                 return@forEachLine
             }
 
-            if (sessionId == null && obj.has("sessionId")) {
-                sessionId = obj.get("sessionId").asString
+            if (sessionId == null) {
+                sessionId = obj.get("sessionId").jsonString()
             }
 
-            if (obj.has("timestamp")) {
+            val timestamp = obj.get("timestamp").jsonString()
+            if (timestamp != null) {
                 val millis = try {
-                    Instant.parse(obj.get("timestamp").asString).toEpochMilli()
+                    Instant.parse(timestamp).toEpochMilli()
                 } catch (e: Exception) {
                     null
                 }
                 if (millis != null && (minTimestampMillis == null || millis < minTimestampMillis!!)) {
                     minTimestampMillis = millis
+                }
+            }
+
+            when (obj.get("type").jsonString()) {
+                "ai-title" -> if (aiTitle == null) aiTitle = obj.get("aiTitle").jsonString()
+                // isSidechain messages are subagent prompts, not what the user actually typed.
+                "user" -> if (firstUserPrompt == null && obj.get("isSidechain").jsonBoolean() != true) {
+                    firstUserPrompt = obj.get("message").jsonObject()?.get("content").jsonString()
                 }
             }
         }
@@ -99,6 +112,12 @@ object SessionDiscoveryService {
             transcriptPath = path,
             startTimeMillis = startTime,
             touchedFileCount = touchedFiles.size,
+            title = (aiTitle ?: firstUserPrompt)?.let { firstLineTruncated(it) } ?: "Untitled session",
         )
+    }
+
+    private fun firstLineTruncated(text: String, maxLen: Int = 70): String {
+        val firstLine = text.lineSequence().firstOrNull { it.isNotBlank() } ?: text
+        return if (firstLine.length > maxLen) firstLine.take(maxLen - 1).trimEnd() + "…" else firstLine
     }
 }

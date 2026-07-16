@@ -7,4 +7,5 @@ data class SessionInfo(
     val transcriptPath: Path,
     val startTimeMillis: Long,
     val touchedFileCount: Int,
+    val title: String,
 )
