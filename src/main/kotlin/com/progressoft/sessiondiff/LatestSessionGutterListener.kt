@@ -2,31 +2,37 @@ package com.progressoft.sessiondiff
 
 import com.intellij.diff.comparison.ComparisonManager
 import com.intellij.diff.comparison.ComparisonPolicy
-import com.intellij.icons.AllIcons
-import com.intellij.openapi.actionSystem.ActionGroup
-import com.intellij.openapi.actionSystem.AnAction
-import com.intellij.openapi.actionSystem.AnActionEvent
-import com.intellij.openapi.actionSystem.DefaultActionGroup
-import com.intellij.openapi.command.WriteCommandAction
-import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.editor.EditorKind
 import com.intellij.openapi.editor.event.EditorFactoryEvent
 import com.intellij.openapi.editor.event.EditorFactoryListener
+import com.intellij.openapi.editor.ex.EditorEx
+import com.intellij.openapi.editor.impl.EditorEmbeddedComponentManager
 import com.intellij.openapi.editor.markup.HighlighterLayer
 import com.intellij.openapi.editor.markup.HighlighterTargetArea
+import com.intellij.openapi.editor.markup.TextAttributes
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.EmptyProgressIndicator
-import com.intellij.openapi.project.Project
-import javax.swing.Icon
+import com.intellij.ui.JBColor
+import java.awt.Color
 import kotlin.io.path.Path
 
+private val NEW_LINE_BACKGROUND = JBColor(Color(226, 246, 226), Color(43, 66, 43))
+
 /**
- * Only the LATEST session gets inline gutter markers — two overlapping sessions touching the
+ * Only the LATEST session gets inline markers — two overlapping sessions touching the
  * same file would have conflicting baselines, so there's no sane "which session" to show inline.
+ *
+ * Renders like GitHub Copilot's inline diff preview: removed/changed lines show as struck-through
+ * "ghost" text above the current lines (via a block Inlay), current/changed lines get a green
+ * background, and a Keep/Reject/Show Diff action bar (a real embedded Swing panel, not just a
+ * gutter icon) sits below each hunk.
  */
 class LatestSessionGutterListener : EditorFactoryListener {
 
     override fun editorCreated(event: EditorFactoryEvent) {
         val editor = event.editor
+        if (editor.editorKind != EditorKind.MAIN_EDITOR) return // skip diff-viewer/console/preview editors
+        val editorEx = editor as? EditorEx ?: return
         val project = editor.project ?: return
         val basePath = project.basePath ?: return
         val file = FileDocumentManager.getInstance().getFile(editor.document) ?: return
@@ -55,59 +61,55 @@ class LatestSessionGutterListener : EditorFactoryListener {
 
         val markup = editor.markupModel
         for (fragment in fragments) {
-            val kind = when {
-                fragment.startOffset1 == fragment.endOffset1 -> HunkKind.ADDED
-                fragment.startOffset2 == fragment.endOffset2 -> HunkKind.DELETED
-                else -> HunkKind.MODIFIED
-            }
-            val highlighter = markup.addRangeHighlighter(
-                fragment.startOffset2,
-                fragment.endOffset2,
-                HighlighterLayer.LAST,
-                null,
-                HighlighterTargetArea.LINES_IN_RANGE,
-            )
-            highlighter.setLineMarkerRenderer(GutterMarkerRenderer(kind))
             val hunkBaselineText = beforeText.substring(fragment.startOffset1, fragment.endOffset1)
-            highlighter.setGutterIconRenderer(
-                HunkGutterIconRenderer(project, editor, session, relpath, fragment.startOffset2, fragment.endOffset2, hunkBaselineText),
-            )
+            val hunkCurrentText = afterText.substring(fragment.startOffset2, fragment.endOffset2)
+            if (ResolvedHunks.isResolved(session.sessionId, relpath, hunkBaselineText, hunkCurrentText)) continue
+
+            val hasOldText = fragment.startOffset1 != fragment.endOffset1
+            val hasNewText = fragment.startOffset2 != fragment.endOffset2
+            val disposables = mutableListOf<() -> Unit>()
+
+            if (hasOldText) {
+                val oldLines = beforeText.substring(fragment.startOffset1, fragment.endOffset1).split("\n")
+                val ghostInlay = editor.inlayModel.addBlockElement(
+                    fragment.startOffset2, false, true, 0, OldCodeBlockRenderer(oldLines),
+                )
+                if (ghostInlay != null) disposables.add { ghostInlay.dispose() }
+            }
+
+            if (hasNewText) {
+                val highlighter = markup.addRangeHighlighter(
+                    fragment.startOffset2,
+                    fragment.endOffset2,
+                    HighlighterLayer.LAST,
+                    TextAttributes(null, NEW_LINE_BACKGROUND, null, null, 0),
+                    HighlighterTargetArea.LINES_IN_RANGE,
+                )
+                disposables.add { markup.removeHighlighter(highlighter) }
+            }
+
+            val rangeMarker = editor.document.createRangeMarker(fragment.startOffset2, fragment.endOffset2)
+
+            lateinit var actionBarInlay: com.intellij.openapi.editor.Inlay<*>
+            val actionBar = HunkActionBar(
+                project, editor, session.sessionId, relpath, rangeMarker, hunkBaselineText, hunkCurrentText,
+            ) {
+                disposables.forEach { it() }
+                actionBarInlay.dispose()
+            }
+            val inlay = EditorEmbeddedComponentManager.getInstance().addComponent(
+                editorEx,
+                actionBar,
+                EditorEmbeddedComponentManager.Properties(
+                    EditorEmbeddedComponentManager.ResizePolicy.none(),
+                    null,
+                    false,
+                    false,
+                    0,
+                    fragment.endOffset2,
+                ),
+            ) ?: continue
+            actionBarInlay = inlay
         }
-    }
-}
-
-private class HunkGutterIconRenderer(
-    private val project: Project,
-    private val editor: Editor,
-    private val session: SessionInfo,
-    private val relpath: String,
-    private val startOffset: Int,
-    private val endOffset: Int,
-    private val baselineHunkText: String,
-) : com.intellij.openapi.editor.markup.GutterIconRenderer() {
-
-    override fun getIcon(): Icon = AllIcons.Actions.Diff
-    override fun getTooltipText(): String = "Changed by Claude this session"
-
-    override fun equals(other: Any?): Boolean = other === this
-    override fun hashCode(): Int = System.identityHashCode(this)
-
-    override fun getPopupMenuActions(): ActionGroup {
-        val group = DefaultActionGroup()
-        group.add(object : AnAction("Rollback", "Revert this change back to before this session", AllIcons.Diff.Revert) {
-            override fun actionPerformed(e: AnActionEvent) {
-                WriteCommandAction.runWriteCommandAction(project) {
-                    val currentEnd = minOf(endOffset, editor.document.textLength)
-                    val currentStart = minOf(startOffset, currentEnd)
-                    editor.document.replaceString(currentStart, currentEnd, baselineHunkText)
-                }
-            }
-        })
-        group.add(object : AnAction("Show Full File Diff", null, AllIcons.Actions.Diff) {
-            override fun actionPerformed(e: AnActionEvent) {
-                DiffPresenter.showDiffForFile(project, session, relpath)
-            }
-        })
-        return group
     }
 }

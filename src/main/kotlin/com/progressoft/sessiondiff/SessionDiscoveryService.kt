@@ -12,6 +12,7 @@ import kotlin.io.path.exists
 object SessionDiscoveryService {
 
     private val TOOL_NAMES_WITH_FILE = setOf("Edit", "Write", "NotebookEdit")
+    private val RM_COMMAND_RE = Regex("""(?:^|[;&|]\s*)rm\s+((?:-\S+\s+)*)(\S+)""")
 
     fun projectsDir(projectBasePath: String): Path {
         val encoded = projectBasePath.replace("/", "-")
@@ -23,8 +24,44 @@ object SessionDiscoveryService {
         if (!dir.exists()) return emptyList()
 
         return dir.listDirectoryEntries("*.jsonl")
-            .mapNotNull { parseTranscript(it) }
+            .mapNotNull { parseTranscript(it, projectBasePath) }
             .sortedByDescending { it.startTimeMillis }
+    }
+
+    /**
+     * Files removed via a Bash `rm <path>` command — Claude Code has no dedicated delete tool, so
+     * this is the only way a file actually gets deleted, and it's otherwise invisible to
+     * [touchedFilesIn] (Edit/Write/NotebookEdit only). Heuristic: resolves the single-target case
+     * (no wildcards, no multiple paths) only — matches the common real-world pattern, not a full
+     * shell parser.
+     */
+    fun bashDeletedFilesIn(transcriptPath: Path, projectBasePath: String): Set<String> {
+        val deleted = mutableSetOf<String>()
+        File(transcriptPath.toString()).forEachLine { line ->
+            if (line.isBlank()) return@forEachLine
+            val obj = try {
+                JsonParser.parseString(line).asJsonObject
+            } catch (e: JsonSyntaxException) {
+                return@forEachLine
+            } catch (e: IllegalStateException) {
+                return@forEachLine
+            }
+            val message = obj.get("message").jsonObject() ?: return@forEachLine
+            val content = message.get("content").jsonArray() ?: return@forEachLine
+            for (block in content) {
+                if (!block.isJsonObject) continue
+                val blockObj = block.asJsonObject
+                if (blockObj.get("type").jsonString() != "tool_use") continue
+                if (blockObj.get("name").jsonString() != "Bash") continue
+                val command = blockObj.get("input").jsonObject()?.get("command").jsonString() ?: continue
+                val match = RM_COMMAND_RE.find(command) ?: continue
+                val rawPath = match.groupValues[2]
+                if (rawPath.contains('*') || rawPath.contains('?')) continue
+                val absolutePath = if (rawPath.startsWith("/")) rawPath else Path(projectBasePath, rawPath).toString()
+                deleted.add(absolutePath)
+            }
+        }
+        return deleted
     }
 
     /**
@@ -61,7 +98,7 @@ object SessionDiscoveryService {
         return touched
     }
 
-    private fun parseTranscript(path: Path): SessionInfo? {
+    private fun parseTranscript(path: Path, projectBasePath: String): SessionInfo? {
         var sessionId: String? = null
         var minTimestampMillis: Long? = null
         var aiTitle: String? = null
@@ -104,7 +141,7 @@ object SessionDiscoveryService {
 
         val id = sessionId ?: path.fileName.toString().removeSuffix(".jsonl")
         val startTime = minTimestampMillis ?: return null
-        val touchedFiles = touchedFilesIn(path)
+        val touchedFiles = touchedFilesIn(path) + bashDeletedFilesIn(path, projectBasePath)
         if (touchedFiles.isEmpty()) return null
 
         return SessionInfo(

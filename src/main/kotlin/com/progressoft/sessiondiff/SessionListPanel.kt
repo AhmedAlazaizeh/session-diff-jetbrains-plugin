@@ -12,7 +12,13 @@ import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.Color
 import java.awt.Cursor
+import java.awt.Dimension
 import java.awt.Font
+import java.awt.Rectangle
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -25,15 +31,20 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.ListCellRenderer
 import javax.swing.ListSelectionModel
+import javax.swing.Scrollable
 import javax.swing.SwingConstants
+import javax.swing.Timer
 import javax.swing.UIManager
 
 private const val CARD_LIST = "list"
 private const val CARD_FILES = "files"
+private const val MIN_WIDTH_FOR_PATH = 260
 
 private val NEW_FILE_COLOR = JBColor(Color(0, 128, 0), Color(98, 151, 85))
 private val ADDED_COUNT_COLOR = NEW_FILE_COLOR
 private val DELETED_COUNT_COLOR = JBColor(Color(196, 0, 0), Color(199, 84, 80))
+private val KEEP_COLOR = JBColor(Color(46, 160, 67), Color(63, 185, 80))
+private val REJECT_COLOR = JBColor(Color(209, 36, 47), Color(224, 90, 90))
 
 class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
 
@@ -43,8 +54,15 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
     private val sessionListModel = DefaultListModel<SessionInfo>()
     private val sessionList = JBList(sessionListModel)
 
-    private val fileListModel = DefaultListModel<FileChangeSummary>()
-    private val fileList = JBList(fileListModel)
+    // Real per-row panels, not a JList — a ListCellRenderer's component is only ever painted, never
+    // a live child, so buttons inside it would never actually receive clicks.
+    private val filesListContainer = object : JPanel(), Scrollable {
+        override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+        override fun getScrollableUnitIncrement(visibleRect: Rectangle, orientation: Int, direction: Int) = 16
+        override fun getScrollableBlockIncrement(visibleRect: Rectangle, orientation: Int, direction: Int) = 64
+        override fun getScrollableTracksViewportWidth() = true
+        override fun getScrollableTracksViewportHeight() = false
+    }
     private val filesHeaderTitle = JLabel()
     private val filesHeaderSubtitle = JLabel()
     private var currentSession: SessionInfo? = null
@@ -83,27 +101,30 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
             BorderFactory.createEmptyBorder(10, 10, 10, 10),
         )
 
-        fileList.selectionMode = ListSelectionModel.SINGLE_SELECTION
-        fileList.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        fileList.emptyText.text = "No files in this project were touched"
-        fileList.cellRenderer = ListCellRenderer<FileChangeSummary> { _, value, _, isSelected, _ -> fileRow(value, isSelected) }
-        fileList.addListSelectionListener { event ->
-            if (!event.valueIsAdjusting) {
-                val summary = fileList.selectedValue ?: return@addListSelectionListener
-                currentSession?.let { DiffPresenter.showDiffForFile(project, it, summary.relpath) }
-            }
-        }
+        filesListContainer.layout = BoxLayout(filesListContainer, BoxLayout.Y_AXIS)
+        filesListContainer.isOpaque = true
+        filesListContainer.background = UIManager.getColor("List.background")
+
         val filesPanel = JPanel(BorderLayout())
         filesPanel.add(header, BorderLayout.NORTH)
-        filesPanel.add(JBScrollPane(fileList), BorderLayout.CENTER)
+        filesPanel.add(JBScrollPane(filesListContainer), BorderLayout.CENTER)
         add(filesPanel, CARD_FILES)
 
         refresh()
+        // The transcripts directory lives outside any project's content root, so the platform's
+        // native file watcher often never notices new/changed files there — poll instead of
+        // relying on VFS change events (see SessionListToolWindowFactory's AsyncFileListener).
+        Timer(3000) {
+            refresh()
+            if (currentSession != null) refreshFiles()
+        }.apply { isRepeats = true; start() }
     }
 
     fun refresh() {
         val basePath = project.basePath ?: return
         val sessions = SessionDiscoveryService.listSessions(basePath)
+        val current = (0 until sessionListModel.size()).map { sessionListModel.getElementAt(it) }
+        if (current == sessions) return
         sessionListModel.clear()
         sessions.forEach { sessionListModel.addElement(it) }
     }
@@ -112,8 +133,7 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
         currentSession = session
         filesHeaderTitle.text = session.title
         filesHeaderSubtitle.text = "${dateFormat.format(Date(session.startTimeMillis))} · ${session.touchedFileCount} files"
-        fileListModel.clear()
-        DiffPresenter.fileSummaries(project, session).forEach { fileListModel.addElement(it) }
+        refreshFiles()
 
         val bashWarnings = BashWarningDetector.bashWarningsFor(session.transcriptPath)
         if (bashWarnings.isNotEmpty()) {
@@ -130,11 +150,30 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
         cardLayout.show(this, CARD_FILES)
     }
 
-    private fun fileRow(summary: FileChangeSummary, isSelected: Boolean): JPanel {
-        val foreground = if (isSelected) UIManager.getColor("List.selectionForeground") else UIManager.getColor("List.foreground")
-        val secondaryForeground = if (isSelected) foreground else UIManager.getColor("Label.disabledForeground")
+    private fun refreshFiles() {
+        val session = currentSession ?: return
+        filesListContainer.removeAll()
+        val summaries = DiffPresenter.fileSummaries(project, session)
+        if (summaries.isEmpty()) {
+            val empty = JLabel("No files in this project were touched", SwingConstants.CENTER)
+            empty.foreground = UIManager.getColor("Label.disabledForeground")
+            empty.border = BorderFactory.createEmptyBorder(20, 0, 20, 0)
+            filesListContainer.add(empty)
+        } else {
+            summaries.forEachIndexed { i, summary ->
+                val nextRelpath = summaries.getOrNull(i + 1)?.relpath ?: summaries.getOrNull(i - 1)?.relpath
+                filesListContainer.add(fileRow(session, summary, nextRelpath))
+            }
+        }
+        filesListContainer.revalidate()
+        filesListContainer.repaint()
+    }
+
+    private fun fileRow(session: SessionInfo, summary: FileChangeSummary, nextRelpath: String?): JPanel {
+        val foreground = UIManager.getColor("List.foreground")
+        val secondaryForeground = UIManager.getColor("Label.disabledForeground")
         val nameColor = when (summary.category) {
-            ChangeCategory.NEW -> if (isSelected) foreground else NEW_FILE_COLOR
+            ChangeCategory.NEW -> NEW_FILE_COLOR
             ChangeCategory.DELETED -> secondaryForeground
             ChangeCategory.MODIFIED -> foreground
         }
@@ -153,28 +192,30 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
         textPanel.layout = BoxLayout(textPanel, BoxLayout.Y_AXIS)
         textPanel.add(nameLabel)
 
+        // Below MIN_WIDTH_FOR_PATH the Keep/Reject buttons and chevron have no room left if the
+        // path is also shown — drop the path first, it's the least essential part of the row. Real
+        // child component now (not a painted list cell), so a live resize listener works correctly.
         val parent = file.parent
+        var dirLabel: JLabel? = null
         if (parent != null) {
-            val dirLabel = JLabel(parent)
+            dirLabel = JLabel(parent)
             dirLabel.foreground = secondaryForeground
             dirLabel.font = dirLabel.font.deriveFont(dirLabel.font.size2D - 1f)
             dirLabel.alignmentX = 0f
             textPanel.add(dirLabel)
         }
 
-        val addedColor = if (isSelected) foreground else ADDED_COUNT_COLOR
-        val deletedColor = if (isSelected) foreground else DELETED_COUNT_COLOR
         val statsComponent = if (summary.isBinary) {
             val binaryLabel = JLabel("binary")
             binaryLabel.foreground = secondaryForeground
             binaryLabel
         } else {
             val addedLabel = JLabel("+${summary.linesAdded}")
-            addedLabel.foreground = addedColor
+            addedLabel.foreground = ADDED_COUNT_COLOR
             addedLabel.font = addedLabel.font.deriveFont(addedLabel.font.size2D - 1f)
             addedLabel.alignmentX = 0.5f
             val deletedLabel = JLabel("-${summary.linesDeleted}")
-            deletedLabel.foreground = deletedColor
+            deletedLabel.foreground = DELETED_COUNT_COLOR
             deletedLabel.font = deletedLabel.font.deriveFont(deletedLabel.font.size2D - 1f)
             deletedLabel.alignmentX = 0.5f
 
@@ -189,6 +230,31 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
         val chevron = JLabel(AllIcons.General.ChevronRight)
         chevron.horizontalAlignment = SwingConstants.RIGHT
 
+        val eastPanel = JPanel()
+        eastPanel.isOpaque = false
+        eastPanel.layout = BoxLayout(eastPanel, BoxLayout.X_AXIS)
+        if (summary.reviewStatus == FileReviewStatus.PENDING) {
+            val keepButton = PillButton("Keep", KEEP_COLOR)
+            val rejectButton = PillButton("Reject", REJECT_COLOR)
+            keepButton.addActionListener {
+                DiffPresenter.keepAllPending(project, session, summary.relpath)
+                refreshFiles()
+            }
+            rejectButton.addActionListener {
+                val wasDiffOpen = DiffPresenter.isDiffTabOpenFor(project, session)
+                DiffPresenter.rejectWholeFile(project, session, summary.relpath)
+                if (wasDiffOpen && nextRelpath != null) {
+                    DiffPresenter.showDiffForFile(project, session, nextRelpath)
+                }
+                refreshFiles()
+            }
+            eastPanel.add(keepButton)
+            eastPanel.add(Box.createHorizontalStrut(4))
+            eastPanel.add(rejectButton)
+            eastPanel.add(Box.createHorizontalStrut(8))
+        }
+        eastPanel.add(chevron)
+
         val westPanel = JPanel()
         westPanel.isOpaque = false
         westPanel.layout = BoxLayout(westPanel, BoxLayout.X_AXIS)
@@ -198,14 +264,40 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
 
         val row = JPanel(BorderLayout())
         row.isOpaque = true
-        row.background = if (isSelected) UIManager.getColor("List.selectionBackground") else UIManager.getColor("List.background")
+        row.background = UIManager.getColor("List.background")
+        row.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         row.border = BorderFactory.createCompoundBorder(
             BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
             BorderFactory.createEmptyBorder(8, 12, 8, 12),
         )
         row.add(westPanel, BorderLayout.WEST)
         row.add(textPanel, BorderLayout.CENTER)
-        row.add(chevron, BorderLayout.EAST)
+        row.add(eastPanel, BorderLayout.EAST)
+        row.maximumSize = Dimension(Int.MAX_VALUE, row.preferredSize.height)
+
+        // Clicks land on the row itself only when they miss the buttons/chevron (real children now
+        // consume their own clicks), so this can't fire when Keep/Reject was actually pressed.
+        row.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                DiffPresenter.showDiffForFile(project, session, summary.relpath)
+            }
+
+            override fun mouseEntered(e: MouseEvent) {
+                row.background = UIManager.getColor("List.selectionBackground")
+            }
+
+            override fun mouseExited(e: MouseEvent) {
+                row.background = UIManager.getColor("List.background")
+            }
+        })
+        if (dirLabel != null) {
+            row.addComponentListener(object : ComponentAdapter() {
+                override fun componentResized(e: ComponentEvent) {
+                    dirLabel.isVisible = row.width >= MIN_WIDTH_FOR_PATH
+                }
+            })
+        }
+
         return row
     }
 

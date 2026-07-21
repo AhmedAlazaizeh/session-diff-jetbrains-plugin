@@ -18,7 +18,8 @@
       <li>0.1.0: session cards with titles, per-file diff stats, native diff viewer, inline gutter markers with Rollback for the latest session</li>
     </ul>
   ]]></change-notes>
-  <idea-version since-build="261"/>
+  <!-- since-build/until-build are set in build.gradle.kts (intellijPlatform.pluginConfiguration.ideaVersion) —
+       patchPluginXml regenerates this tag from that DSL and discards anything written here directly. -->
 
   <depends>com.intellij.modules.platform</depends>
 

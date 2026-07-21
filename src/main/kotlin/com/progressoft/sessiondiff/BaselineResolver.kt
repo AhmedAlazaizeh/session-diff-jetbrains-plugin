@@ -93,6 +93,32 @@ object BaselineResolver {
         }
     }
 
+    /** Last resort when a file has no snapshot and no longer exists — almost always a Bash `rm`,
+     *  which our own hook (Edit/Write/NotebookEdit PreToolUse only) never sees happen. */
+    private fun gitShowHead(absolutePath: String, projectBasePath: String): ByteArray? {
+        if (!isInsideGitWorkTree(projectBasePath)) return null
+        val relpath = try {
+            Path(projectBasePath).relativize(Path(absolutePath)).toString()
+        } catch (e: IllegalArgumentException) {
+            return null
+        }
+        return try {
+            val process = ProcessBuilder("git", "-C", projectBasePath, "show", "HEAD:$relpath")
+                .redirectErrorStream(false)
+                .start()
+            val output = ByteArrayOutputStream()
+            process.inputStream.copyTo(output)
+            val finished = process.waitFor(2, TimeUnit.SECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                return null
+            }
+            if (process.exitValue() != 0) null else output.toByteArray()
+        } catch (e: IOException) {
+            null
+        }
+    }
+
     fun resolve(session: SessionInfo, absolutePath: String, projectBasePath: String): Baseline {
         val ownPath = ownStorePath(session.sessionId, absolutePath)
         if (ownPath.exists()) {
@@ -105,6 +131,11 @@ object BaselineResolver {
         }
 
         val currentFile = Path(absolutePath)
+        if (!currentFile.exists()) {
+            val gitBytes = gitShowHead(absolutePath, projectBasePath)
+            if (gitBytes != null) return Baseline.Found(gitBytes)
+        }
+
         val currentBytes = if (currentFile.exists()) currentFile.readBytes() else ByteArray(0)
         return if (isGitUntracked(absolutePath, projectBasePath)) {
             Baseline.UntrackedNoBaseline(currentBytes)
