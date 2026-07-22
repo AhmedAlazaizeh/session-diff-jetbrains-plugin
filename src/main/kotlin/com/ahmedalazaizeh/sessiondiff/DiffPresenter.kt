@@ -38,7 +38,7 @@ object DiffPresenter {
         val editedFiles = SessionDiscoveryService.touchedFilesIn(session.transcriptPath, projectBasePath)
         val bashDeletedFiles = SessionDiscoveryService.bashDeletedFilesIn(session.transcriptPath, projectBasePath)
         return (editedFiles + bashDeletedFiles)
-            .mapNotNull { absolutePath -> summaryFor(session, projectBasePath, absolutePath) }
+            .mapNotNull { absolutePath -> summaryFor(project, session, projectBasePath, absolutePath) }
             .sortedBy { it.relpath }
     }
 
@@ -46,7 +46,7 @@ object DiffPresenter {
     fun keepAllPending(project: Project, session: SessionInfo, relpath: String) {
         val projectBasePath = project.basePath ?: return
         val absolutePath = Path(projectBasePath, relpath).toString()
-        val baseline = BaselineResolver.resolve(session, absolutePath, projectBasePath) as? Baseline.Found ?: return
+        val baseline = BaselineResolver.resolve(project, session, absolutePath, projectBasePath) as? Baseline.Found ?: return
         val currentFile = File(absolutePath)
         if (!currentFile.isFile) return
         val afterBytes = currentFile.readBytes()
@@ -76,7 +76,7 @@ object DiffPresenter {
     fun rejectWholeFile(project: Project, session: SessionInfo, relpath: String) {
         val projectBasePath = project.basePath ?: return
         val absolutePath = Path(projectBasePath, relpath).toString()
-        val baseline = BaselineResolver.resolve(session, absolutePath, projectBasePath) as? Baseline.Found ?: return
+        val baseline = BaselineResolver.resolve(project, session, absolutePath, projectBasePath) as? Baseline.Found ?: return
         val currentFile = File(absolutePath)
         if (currentFile.isDirectory) return
         val afterExists = currentFile.isFile
@@ -105,7 +105,7 @@ object DiffPresenter {
         DismissedFiles.dismiss(session.sessionId, relpath, revertedBytes.contentHashCode().toLong())
     }
 
-    private fun summaryFor(session: SessionInfo, projectBasePath: String, absolutePath: String): FileChangeSummary? {
+    private fun summaryFor(project: Project, session: SessionInfo, projectBasePath: String, absolutePath: String): FileChangeSummary? {
         val relpath = try {
             Path(projectBasePath).relativize(Path(absolutePath)).toString()
         } catch (e: IllegalArgumentException) {
@@ -113,7 +113,7 @@ object DiffPresenter {
         }
         if (relpath.startsWith("..")) return null // outside project root — matches session-diff.py's outside_cwd handling
 
-        val baseline = BaselineResolver.resolve(session, absolutePath, projectBasePath)
+        val baseline = BaselineResolver.resolve(project, session, absolutePath, projectBasePath)
         val beforeBytes = when (baseline) {
             is Baseline.Found -> baseline.bytes
             is Baseline.UntrackedNoBaseline -> ByteArray(0)
@@ -232,7 +232,7 @@ object DiffPresenter {
         val unresolved = mutableListOf<String>()
         overlapping.forEach { rp ->
             val absolutePath = Path(projectBasePath, rp).toString()
-            val reconstructed = TranscriptReplay.reconstructEndOfSession(allSessions, session, absolutePath, projectBasePath)
+            val reconstructed = TranscriptReplay.reconstructEndOfSession(project, allSessions, session, absolutePath, projectBasePath)
             if (reconstructed != null) overrides[rp] = reconstructed else unresolved.add(rp)
         }
 
@@ -266,7 +266,7 @@ object DiffPresenter {
         overrideAfterBytes: ByteArray?,
     ): SimpleDiffRequest? {
         val absolutePath = Path(projectBasePath, relpath).toString()
-        val baseline = BaselineResolver.resolve(session, absolutePath, projectBasePath)
+        val baseline = BaselineResolver.resolve(project, session, absolutePath, projectBasePath)
         val beforeBytes = when (baseline) {
             is Baseline.Found -> baseline.bytes
             is Baseline.UntrackedNoBaseline -> {

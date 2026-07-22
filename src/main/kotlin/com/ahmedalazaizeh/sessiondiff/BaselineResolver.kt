@@ -1,12 +1,15 @@
 package com.ahmedalazaizeh.sessiondiff
 
 import com.google.gson.JsonParser
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.vcs.ProjectLevelVcsManager
+import com.intellij.openapi.vcs.changes.ChangeListManager
+import com.intellij.openapi.vfs.LocalFileSystem
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.nio.file.Path
 import java.security.MessageDigest
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.Path
 import kotlin.io.path.exists
@@ -65,49 +68,24 @@ object BaselineResolver {
         return historyFile.readBytes()
     }
 
-    // Spawning `git` blocks for up to 2s on a process the OS has to schedule — cheap to call once,
-    // expensive to call on every poll tick for every open file. Whether a project is a git work
-    // tree essentially never changes during a session, and per-path tracked status rarely does
-    // either, so cache both rather than re-spawning git repeatedly for the same answer.
-    private val gitWorkTreeCache = ConcurrentHashMap<String, Boolean>()
-    private val gitUntrackedCache = ConcurrentHashMap<String, Boolean>()
+    // The platform already tracks VCS state itself (no subprocess, no need for our own cache on
+    // top) — ProjectLevelVcsManager/ChangeListManager answer from that instead of spawning `git`.
+    // gitShowHead below is the one remaining subprocess call, kept because reading a file's content
+    // at HEAD has no equivalent platform-only API without a hard dependency on the git4idea plugin —
+    // it's also a rare "last resort" path, not part of the hot per-file poll loop.
+    private fun isInsideVcsWorkTree(project: Project): Boolean =
+        ProjectLevelVcsManager.getInstance(project).hasActiveVcss()
 
-    private fun isInsideGitWorkTree(projectBasePath: String): Boolean =
-        gitWorkTreeCache.getOrPut(projectBasePath) {
-            try {
-                val process = ProcessBuilder("git", "-C", projectBasePath, "rev-parse", "--is-inside-work-tree").start()
-                val finished = process.waitFor(2, TimeUnit.SECONDS)
-                finished && process.exitValue() == 0
-            } catch (e: IOException) {
-                false
-            }
-        }
-
-    private fun isGitUntracked(absolutePath: String, projectBasePath: String): Boolean {
-        if (!isInsideGitWorkTree(projectBasePath)) return false
-        return gitUntrackedCache.getOrPut("$projectBasePath|$absolutePath") {
-            try {
-                val process = ProcessBuilder("git", "-C", projectBasePath, "status", "--porcelain=v1", "--", absolutePath)
-                    .redirectErrorStream(false)
-                    .start()
-                val output = ByteArrayOutputStream()
-                process.inputStream.copyTo(output)
-                val finished = process.waitFor(2, TimeUnit.SECONDS)
-                if (!finished) {
-                    process.destroyForcibly()
-                    return@getOrPut false
-                }
-                output.toString().lines().any { it.startsWith("??") }
-            } catch (e: IOException) {
-                false
-            }
-        }
+    private fun isVcsUntracked(project: Project, absolutePath: String): Boolean {
+        if (!isInsideVcsWorkTree(project)) return false
+        val virtualFile = LocalFileSystem.getInstance().findFileByPath(absolutePath) ?: return false
+        return ChangeListManager.getInstance(project).isUnversioned(virtualFile)
     }
 
     /** Last resort when a file has no snapshot and no longer exists — almost always a Bash `rm`,
      *  which our own hook (Edit/Write/NotebookEdit PreToolUse only) never sees happen. */
-    private fun gitShowHead(absolutePath: String, projectBasePath: String): ByteArray? {
-        if (!isInsideGitWorkTree(projectBasePath)) return null
+    private fun gitShowHead(project: Project, absolutePath: String, projectBasePath: String): ByteArray? {
+        if (!isInsideVcsWorkTree(project)) return null
         val relpath = try {
             Path(projectBasePath).relativize(Path(absolutePath)).toString()
         } catch (e: IllegalArgumentException) {
@@ -130,7 +108,7 @@ object BaselineResolver {
         }
     }
 
-    fun resolve(session: SessionInfo, absolutePath: String, projectBasePath: String): Baseline {
+    fun resolve(project: Project, session: SessionInfo, absolutePath: String, projectBasePath: String): Baseline {
         val ownPath = ownStorePath(session.sessionId, absolutePath)
         if (ownPath.exists()) {
             return Baseline.Found(ownPath.readBytes())
@@ -144,12 +122,12 @@ object BaselineResolver {
         val currentFile = Path(absolutePath)
         val isRegularFile = currentFile.exists() && currentFile.toFile().isFile
         if (!isRegularFile) {
-            val gitBytes = gitShowHead(absolutePath, projectBasePath)
+            val gitBytes = gitShowHead(project, absolutePath, projectBasePath)
             if (gitBytes != null) return Baseline.Found(gitBytes)
         }
 
         val currentBytes = if (isRegularFile) currentFile.readBytes() else ByteArray(0)
-        return if (isGitUntracked(absolutePath, projectBasePath)) {
+        return if (isVcsUntracked(project, absolutePath)) {
             Baseline.UntrackedNoBaseline(currentBytes)
         } else {
             Baseline.Missing

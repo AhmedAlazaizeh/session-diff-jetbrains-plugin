@@ -1,6 +1,7 @@
 package com.ahmedalazaizeh.sessiondiff
 
 import com.google.gson.JsonParser
+import com.intellij.openapi.project.Project
 import java.io.File
 import java.time.Instant
 import kotlin.io.path.Path
@@ -38,6 +39,7 @@ object TranscriptReplay {
 
     /** Null if replay isn't possible or reliable for this path — caller should fall back to diffing the live file. */
     fun reconstructEndOfSession(
+        project: Project,
         allSessions: List<SessionInfo>,
         targetSession: SessionInfo,
         absolutePath: String,
@@ -50,7 +52,7 @@ object TranscriptReplay {
         if (touchingSessions.none { it.sessionId == targetSession.sessionId }) return null
         val earliestSession = touchingSessions.minByOrNull { it.startTimeMillis } ?: return null
 
-        val baseline = BaselineResolver.resolve(earliestSession, absolutePath, projectBasePath) as? Baseline.Found ?: return null
+        val baseline = BaselineResolver.resolve(project, earliestSession, absolutePath, projectBasePath) as? Baseline.Found ?: return null
         if (isBinary(baseline.bytes)) return null // string-based replay doesn't apply to binary content
 
         val ops = touchingSessions

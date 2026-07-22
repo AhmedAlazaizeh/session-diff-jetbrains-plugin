@@ -17,6 +17,11 @@
   ]]></description>
   <change-notes><![CDATA[
     <ul>
+      <li>0.2.9: pinning an older session no longer shows a newer session's hunks mixed in inline (or
+          hides the file outright) — replays the pinned session's own edits and remaps them onto the
+          live document, dropping only the specific hunks a later edit actually collides with; the
+          `git` subprocess checks for untracked/no-VCS files are now native ChangeListManager/
+          ProjectLevelVcsManager lookups instead (no subprocess, no custom cache needed)</li>
       <li>0.2.8: inline word-diff colors reworked to match IntelliJ's native diff popup exactly (colors
           picked from the real thing): grey wash/emphasis for old/removed content, green for new/added,
           a gutter strip on the live line, and a caret marker for pure insertion points; word-level

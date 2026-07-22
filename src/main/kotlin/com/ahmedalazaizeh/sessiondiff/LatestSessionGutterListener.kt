@@ -62,11 +62,14 @@ private val MARKERS_KEY = Key.create<MutableList<() -> Unit>>("com.ahmedalazaize
 private val SIGNATURE_KEY = Key.create<String>("com.ahmedalazaizeh.sessiondiff.signature")
 
 /**
- * Only the ACTIVE session gets inline markers — two overlapping sessions touching the same file
- * would have conflicting baselines, so there's no sane "which session" to show inline. Defaults to
- * the latest session, but the user can pin a different one via a session card's "..." menu
- * (ActiveSessionStore) — [refreshAllEditorsFor] re-runs this on every open editor when that changes,
- * since markers are otherwise only computed once, when an editor is created.
+ * Only the ACTIVE session gets inline markers. Defaults to the latest session, but the user can pin
+ * a different (older) one via a session card's "..." menu (ActiveSessionStore) —
+ * [refreshAllEditorsFor] re-runs this on every open editor when that changes, since markers are
+ * otherwise only computed once, when an editor is created. If a later session also touched the same
+ * file, the live document mixes both sessions' edits — [computePlan] replays the pinned session's
+ * own edits via [TranscriptReplay] and remaps them onto live-document offsets, dropping any hunk a
+ * later edit actually collides with (no single correct live position to anchor it at), rather than
+ * either showing the later session's hunks too or hiding the whole file.
  *
  * Matches IntelliJ's own local-changes diff popup: a line modified in place shows its old text above
  * and current text below, both in normal color, with only the actually-changed word/phrase called out
@@ -119,6 +122,19 @@ class LatestSessionGutterListener : EditorFactoryListener {
             editor.putUserData(MARKERS_KEY, null)
         }
 
+        /**
+         * A resolved hunk ready to render: offset1/2 always describe real spans in [MarkerPlan.beforeText]
+         * / [MarkerPlan.afterText] respectively — even when computed via cross-session replay + remap
+         * (see [computePlan]), never in some intermediate reconstructed text's own coordinate space.
+         */
+        private class Hunk(
+            val startOffset1: Int,
+            val endOffset1: Int,
+            val startOffset2: Int,
+            val endOffset2: Int,
+            val innerFragments: List<DiffFragment>?,
+        )
+
         private class MarkerPlan(
             val editor: Editor,
             val editorEx: EditorEx,
@@ -127,7 +143,7 @@ class LatestSessionGutterListener : EditorFactoryListener {
             val relpath: String,
             val beforeText: String,
             val afterText: String,
-            val fragments: List<LineFragment>,
+            val hunks: List<Hunk>,
             val signature: String,
         )
 
@@ -141,6 +157,13 @@ class LatestSessionGutterListener : EditorFactoryListener {
             val session = SessionDiscoveryService.activeSessionFor(basePath) ?: return null
             if (file.path !in SessionDiscoveryService.touchedFilesIn(session.transcriptPath, basePath)) return null
 
+            val allSessions = SessionDiscoveryService.listSessions(basePath)
+            val laterSessionsAlsoTouchedThis = allSessions.filter { other ->
+                other.sessionId != session.sessionId && other.startTimeMillis > session.startTimeMillis &&
+                    (file.path in SessionDiscoveryService.touchedFilesIn(other.transcriptPath, basePath) ||
+                        file.path in SessionDiscoveryService.bashDeletedFilesIn(other.transcriptPath, basePath))
+            }
+
             val relpath = try {
                 Path(basePath).relativize(Path(file.path)).toString()
             } catch (e: IllegalArgumentException) {
@@ -148,7 +171,7 @@ class LatestSessionGutterListener : EditorFactoryListener {
             }
             if (relpath.startsWith("..")) return null
 
-            val baseline = BaselineResolver.resolve(session, file.path, basePath)
+            val baseline = BaselineResolver.resolve(project, session, file.path, basePath)
             val beforeText = when (baseline) {
                 is Baseline.Found -> String(baseline.bytes, Charsets.UTF_8)
                 else -> return null // no real baseline — nothing meaningful to mark inline
@@ -161,10 +184,29 @@ class LatestSessionGutterListener : EditorFactoryListener {
             // character-level innerFragments where the old/new text can be sensibly aligned word by
             // word — that's what lets applyPlan render precise word highlights instead of whole-line
             // color for a line modified in place.
-            val fragments = ComparisonManager.getInstance().compareLinesInner(
-                beforeText, afterText, ComparisonPolicy.DEFAULT, EmptyProgressIndicator(),
-            )
-            if (fragments.isEmpty()) return null
+            val hunks = if (laterSessionsAlsoTouchedThis.isEmpty()) {
+                ComparisonManager.getInstance().compareLinesInner(beforeText, afterText, ComparisonPolicy.DEFAULT, EmptyProgressIndicator())
+                    .map { f -> Hunk(f.startOffset1, f.endOffset1, f.startOffset2, f.endOffset2, f.innerFragments) }
+            } else {
+                // A later session also touched this file, so the live text mixes both sessions'
+                // edits — diffing baseline straight against the live text would misattribute the
+                // later session's hunks to this (pinned, older) one. Replay reconstructs the file
+                // exactly as this session left it, isolating its own hunks correctly; those hunks'
+                // "after" offsets are then in that reconstructed text's coordinate space, not the
+                // live document's, so remapHunksToLiveOffsets translates them — dropping any hunk a
+                // later edit actually collides with, since there's no safe span to place it at.
+                val sessionEndBytes = TranscriptReplay.reconstructEndOfSession(project, allSessions, session, file.path, basePath)
+                    ?: return null
+                val sessionEndText = String(sessionEndBytes, Charsets.UTF_8)
+                val ownFragments = ComparisonManager.getInstance().compareLinesInner(
+                    beforeText, sessionEndText, ComparisonPolicy.DEFAULT, EmptyProgressIndicator(),
+                )
+                val laterFragments = ComparisonManager.getInstance().compareLines(
+                    sessionEndText, afterText, ComparisonPolicy.DEFAULT, EmptyProgressIndicator(),
+                )
+                remapHunksToLiveOffsets(ownFragments, laterFragments)
+            }
+            if (hunks.isEmpty()) return null
 
             // Encodes exactly what applyPlan renders: each hunk's position and its resolution
             // (or lack of one) — changes whenever the text OR a Keep/Reject decision changes,
@@ -172,15 +214,15 @@ class LatestSessionGutterListener : EditorFactoryListener {
             // triggers a rebuild instead of leaving a stale action bar showing.
             val signature = buildString {
                 append(session.sessionId).append('|').append(relpath)
-                fragments.forEach { fragment ->
-                    val oldHunk = beforeText.substring(fragment.startOffset1, fragment.endOffset1)
-                    val newHunk = afterText.substring(fragment.startOffset2, fragment.endOffset2)
-                    append('|').append(fragment.startOffset2).append(':').append(fragment.endOffset2)
+                hunks.forEach { hunk ->
+                    val oldHunk = beforeText.substring(hunk.startOffset1, hunk.endOffset1)
+                    val newHunk = afterText.substring(hunk.startOffset2, hunk.endOffset2)
+                    append('|').append(hunk.startOffset2).append(':').append(hunk.endOffset2)
                     append(':').append(ResolvedHunks.decisionFor(session.sessionId, relpath, oldHunk, newHunk))
                 }
             }
 
-            return MarkerPlan(editor, editorEx, project, session, relpath, beforeText, afterText, fragments, signature)
+            return MarkerPlan(editor, editorEx, project, session, relpath, beforeText, afterText, hunks, signature)
         }
 
         private fun applyPlan(plan: MarkerPlan) {
@@ -188,13 +230,13 @@ class LatestSessionGutterListener : EditorFactoryListener {
 
             val editorWideDisposables = mutableListOf<() -> Unit>()
             val markup = plan.editor.markupModel
-            for (fragment in plan.fragments) {
-                val hunkBaselineText = plan.beforeText.substring(fragment.startOffset1, fragment.endOffset1)
-                val hunkCurrentText = plan.afterText.substring(fragment.startOffset2, fragment.endOffset2)
+            for (hunk in plan.hunks) {
+                val hunkBaselineText = plan.beforeText.substring(hunk.startOffset1, hunk.endOffset1)
+                val hunkCurrentText = plan.afterText.substring(hunk.startOffset2, hunk.endOffset2)
                 if (ResolvedHunks.isResolved(plan.session.sessionId, plan.relpath, hunkBaselineText, hunkCurrentText)) continue
 
-                val hasOldText = fragment.startOffset1 != fragment.endOffset1
-                val hasNewText = fragment.startOffset2 != fragment.endOffset2
+                val hasOldText = hunk.startOffset1 != hunk.endOffset1
+                val hasNewText = hunk.startOffset2 != hunk.endOffset2
                 val disposables = mutableListOf<() -> Unit>()
 
                 // innerFragments is only non-null where the platform found the old/new text sensibly
@@ -204,7 +246,7 @@ class LatestSessionGutterListener : EditorFactoryListener {
                 // (e.g. a renamed method plus a new argument) — in that case the "precise" word
                 // highlight ends up covering nearly the whole line anyway, which just looks like a
                 // solid wash with no useful contrast, so treat that as unalignable too.
-                val innerFragments = fragment.innerFragments
+                val innerFragments = hunk.innerFragments
                     ?.takeIf { isWordLevelAlignmentUseful(it, hunkBaselineText, hunkCurrentText) }
 
                 if (innerFragments != null && hasOldText && hasNewText) {
@@ -225,7 +267,7 @@ class LatestSessionGutterListener : EditorFactoryListener {
                     }
                     if (oldRangesPerLine.any { it.isNotEmpty() } || oldInsertionPointsPerLine.any { it.isNotEmpty() }) {
                         val ghostInlay = plan.editor.inlayModel.addBlockElement(
-                            fragment.startOffset2, false, true, 0,
+                            hunk.startOffset2, false, true, 0,
                             OldLinesWithHighlightsRenderer(oldLines, oldRangesPerLine, oldInsertionPointsPerLine),
                         )
                         if (ghostInlay != null) {
@@ -240,8 +282,8 @@ class LatestSessionGutterListener : EditorFactoryListener {
                     // neutral highlight color unrelated to add/remove.
                     val insertedColor: Color = INSERTED_COLOR
                     val lineWash = markup.addRangeHighlighter(
-                        fragment.startOffset2,
-                        fragment.endOffset2,
+                        hunk.startOffset2,
+                        hunk.endOffset2,
                         HighlighterLayer.WARNING,
                         TextAttributes(null, INSERTED_LINE_BACKGROUND_COLOR, null, null, 0),
                         HighlighterTargetArea.LINES_IN_RANGE,
@@ -253,8 +295,8 @@ class LatestSessionGutterListener : EditorFactoryListener {
                     innerFragments.forEach { inner ->
                         if (inner.startOffset2 != inner.endOffset2) {
                             val highlighter = markup.addRangeHighlighter(
-                                fragment.startOffset2 + inner.startOffset2,
-                                fragment.startOffset2 + inner.endOffset2,
+                                hunk.startOffset2 + inner.startOffset2,
+                                hunk.startOffset2 + inner.endOffset2,
                                 HighlighterLayer.LAST,
                                 TextAttributes(null, INSERTED_WORD_EMPHASIS_COLOR, null, null, 0),
                                 HighlighterTargetArea.EXACT_RANGE,
@@ -266,7 +308,7 @@ class LatestSessionGutterListener : EditorFactoryListener {
                 } else {
                     if (hasOldText) {
                         val ghostInlay = plan.editor.inlayModel.addBlockElement(
-                            fragment.startOffset2, false, true, 0, OldCodeBlockRenderer(hunkBaselineText.split("\n")),
+                            hunk.startOffset2, false, true, 0, OldCodeBlockRenderer(hunkBaselineText.split("\n")),
                         )
                         if (ghostInlay != null) {
                             disposables.add { ghostInlay.dispose() }
@@ -276,8 +318,8 @@ class LatestSessionGutterListener : EditorFactoryListener {
 
                     if (hasNewText) {
                         val highlighter = markup.addRangeHighlighter(
-                            fragment.startOffset2,
-                            fragment.endOffset2,
+                            hunk.startOffset2,
+                            hunk.endOffset2,
                             HighlighterLayer.LAST,
                             TextAttributes(null, INSERTED_LINE_BACKGROUND_COLOR, null, null, 0),
                             HighlighterTargetArea.LINES_IN_RANGE,
@@ -288,7 +330,7 @@ class LatestSessionGutterListener : EditorFactoryListener {
                     }
                 }
 
-                val rangeMarker = plan.editor.document.createRangeMarker(fragment.startOffset2, fragment.endOffset2)
+                val rangeMarker = plan.editor.document.createRangeMarker(hunk.startOffset2, hunk.endOffset2)
 
                 lateinit var actionBarInlay: com.intellij.openapi.editor.Inlay<*>
                 val actionBar = HunkActionBar(
@@ -306,7 +348,7 @@ class LatestSessionGutterListener : EditorFactoryListener {
                         false,
                         false,
                         0,
-                        fragment.endOffset2,
+                        hunk.endOffset2,
                     ),
                 ) ?: continue
                 actionBarInlay = inlay
@@ -314,6 +356,40 @@ class LatestSessionGutterListener : EditorFactoryListener {
             }
 
             plan.editor.putUserData(MARKERS_KEY, editorWideDisposables)
+        }
+
+        /**
+         * [ownFragments] are hunks between [MarkerPlan.beforeText] (offset1 side, already correct)
+         * and a reconstructed "session-end" text (offset2 side — NOT the live document).
+         * [laterFragments] is the diff from that same reconstructed text to the live document,
+         * i.e. everything a later session did afterward. Translates each own-fragment's offset2 span
+         * into the live document's coordinate space by accumulating the net length change of every
+         * later-fragment strictly before it, and drops any own-fragment whose span is actually
+         * touched by a later-fragment — that's a genuine conflict (the later session further
+         * changed this exact spot), and there's no single correct live position to anchor it at.
+         */
+        private fun remapHunksToLiveOffsets(ownFragments: List<LineFragment>, laterFragments: List<LineFragment>): List<Hunk> {
+            // Net length change of every later-fragment entirely before `offset` — valid to reuse
+            // across a whole own-fragment's [start, end) span once we know (via the overlap check
+            // below) that no later fragment falls inside that span, so the shift can't change partway.
+            fun shiftBefore(offset: Int): Int {
+                var shift = 0
+                for (later in laterFragments) {
+                    if (later.endOffset1 > offset) break // later fragments are in document order
+                    shift += (later.endOffset2 - later.startOffset2) - (later.endOffset1 - later.startOffset1)
+                }
+                return shift
+            }
+
+            return ownFragments.mapNotNull { f ->
+                // A later fragment overlapping this hunk's span at all is a genuine conflict — the
+                // later session further changed this exact spot, so there's no single correct live
+                // position to anchor it at.
+                val conflicts = laterFragments.any { it.startOffset1 < f.endOffset2 && it.endOffset1 > f.startOffset2 }
+                if (conflicts) return@mapNotNull null
+                val shift = shiftBefore(f.startOffset2)
+                Hunk(f.startOffset1, f.endOffset1, f.startOffset2 + shift, f.endOffset2 + shift, f.innerFragments)
+            }
         }
 
         /**
