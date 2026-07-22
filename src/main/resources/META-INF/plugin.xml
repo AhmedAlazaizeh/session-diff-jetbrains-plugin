@@ -17,6 +17,11 @@
   ]]></description>
   <change-notes><![CDATA[
     <ul>
+      <li>0.2.5: fixed IDE lag from this plugin's polling (disk/git work off the EDT, cached transcript
+          scans, memoized git checks); dismissed sessions/files now reappear once actually touched
+          again instead of staying hidden forever; fixed inline markers and the file list rebuilding
+          on every poll tick even with no changes; auto-hide a file once fully reviewed</li>
+      <li>0.2.4: fixed a crash in "Clear All Sessions" when a touched path was actually a directory</li>
       <li>0.2.3: fixed the tool window stripe icon losing its "+" mark when active/selected; require restart on
           plugin install/update/uninstall</li>
       <li>0.2.2: "Clear All Sessions" button, with confirmation before auto-accepting any unreviewed changes;

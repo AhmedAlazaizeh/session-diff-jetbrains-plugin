@@ -1,6 +1,7 @@
 package com.progressoft.sessiondiff
 
 import java.awt.Color
+import java.awt.Cursor
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
@@ -23,6 +24,8 @@ class PillButton(text: String, private val color: Color) : JButton(text) {
         foreground = Color.WHITE
         font = font.deriveFont(font.size2D - 2f)
         border = BorderFactory.createEmptyBorder(1, 7, 1, 7)
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        isRolloverEnabled = true
     }
 
     override fun paintComponent(g: Graphics) {
@@ -31,6 +34,7 @@ class PillButton(text: String, private val color: Color) : JButton(text) {
         g2.color = if (model.isRollover) color.brighter() else color
         g2.fillRoundRect(0, 0, width, height, CORNER_ARC, CORNER_ARC)
         g2.dispose()
+        foreground = if (model.isRollover) Color.BLACK else Color.WHITE
         super.paintComponent(g)
     }
 }

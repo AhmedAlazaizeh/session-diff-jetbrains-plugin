@@ -3,6 +3,8 @@ package com.progressoft.sessiondiff
 import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
@@ -57,15 +59,20 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
     private val filesHeaderTitle = JLabel()
     private val filesHeaderSubtitle = JLabel()
     private var currentSession: SessionInfo? = null
-    private var lastRenderedSessions: List<SessionInfo> = emptyList()
+    // null, not emptyList() — an empty project's very first refresh() must not match this default
+    // and skip rendering (it would otherwise never show the empty-state label or hide the header).
+    private var lastRenderedSessions: List<SessionInfo>? = null
     private var lastRenderedActiveId: String? = null
+    private var lastRenderedFileSession: SessionInfo? = null
+    private var lastRenderedFileSummaries: List<FileChangeSummary>? = null
+    private val listHeader: JPanel
 
     init {
         val clearAllButton = JButton("Clear All Sessions")
         clearAllButton.toolTipText = "Remove all sessions from this list (transcripts on disk are untouched)"
         clearAllButton.addActionListener { clearAllSessions() }
 
-        val listHeader = JPanel(BorderLayout())
+        listHeader = JPanel(BorderLayout())
         listHeader.add(clearAllButton, BorderLayout.EAST)
         listHeader.border = BorderFactory.createCompoundBorder(
             BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
@@ -108,26 +115,51 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
         // The transcripts directory lives outside any project's content root, so the platform's
         // native file watcher often never notices new/changed files there — poll instead of
         // relying on VFS change events (see SessionListToolWindowFactory's AsyncFileListener).
+        // Same reasoning for editors already open when Claude edits their file: nothing else tells
+        // LatestSessionGutterListener to recompute its Keep/Reject bars for an existing editor
+        // instance (only a fresh editorCreated does), so it'd otherwise take closing and reopening
+        // the file to see the action bar appear.
         Timer(3000) {
             refresh()
             if (currentSession != null) refreshFiles()
+            LatestSessionGutterListener.refreshAllEditorsFor(project)
         }.apply { isRepeats = true; start() }
     }
 
+    // Disk IO (transcript scans, possibly a `git` subprocess) happens off the EDT — this runs every
+    // 3s from the poll Timer, and blocking the UI thread that often is exactly what made the IDE
+    // feel sluggish. Only the actual Swing mutation goes through invokeLater.
     fun refresh() {
         val basePath = project.basePath ?: return
-        val sessions = SessionDiscoveryService.listSessions(basePath)
-        val activeId = SessionDiscoveryService.activeSessionFor(basePath)?.sessionId
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val sessions = SessionDiscoveryService.listSessions(basePath)
+            val activeId = SessionDiscoveryService.activeSessionFor(basePath)?.sessionId
+            ApplicationManager.getApplication().invokeLater(
+                { renderSessions(sessions, activeId, basePath) },
+                ModalityState.any(),
+            )
+        }
+    }
+
+    private fun renderSessions(sessions: List<SessionInfo>, activeId: String?, basePath: String) {
         if (sessions == lastRenderedSessions && activeId == lastRenderedActiveId) return
         lastRenderedSessions = sessions
         lastRenderedActiveId = activeId
+
+        listHeader.isVisible = sessions.isNotEmpty()
 
         sessionsListContainer.removeAll()
         if (sessions.isEmpty()) {
             val empty = JLabel("No Claude sessions found for this project", SwingConstants.CENTER)
             empty.foreground = UIManager.getColor("Label.disabledForeground")
-            empty.border = BorderFactory.createEmptyBorder(20, 0, 20, 0)
-            sessionsListContainer.add(empty)
+            empty.alignmentX = 0.5f
+            val emptyWrapper = JPanel()
+            emptyWrapper.isOpaque = false
+            emptyWrapper.layout = BoxLayout(emptyWrapper, BoxLayout.Y_AXIS)
+            emptyWrapper.add(Box.createVerticalStrut(60))
+            emptyWrapper.add(empty)
+            emptyWrapper.add(Box.createVerticalStrut(20))
+            sessionsListContainer.add(emptyWrapper)
         } else {
             sessions.forEach { session -> sessionsListContainer.add(sessionCard(session, session.sessionId == activeId, basePath)) }
         }
@@ -169,8 +201,9 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
             DiffPresenter.fileSummaries(project, session)
                 .filter { it.reviewStatus == FileReviewStatus.PENDING }
                 .forEach { summary -> DiffPresenter.keepAllPending(project, session, summary.relpath) }
-            ClearedSessions.clear(basePath, session.sessionId)
+            ClearedSessions.clear(basePath, session.sessionId, session.transcriptPath.toFile().length())
         }
+        LatestSessionGutterListener.refreshAllEditorsFor(project)
         refresh()
     }
 
@@ -195,15 +228,41 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
         cardLayout.show(this, CARD_FILES)
     }
 
+    // Same off-EDT treatment as refresh() — fileSummaries() reads every touched file's baseline and
+    // current content from disk (and possibly spawns git) for every file in the session.
     private fun refreshFiles() {
         val session = currentSession ?: return
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val summaries = DiffPresenter.fileSummaries(project, session)
+            ApplicationManager.getApplication().invokeLater(
+                { renderFiles(session, summaries) },
+                ModalityState.any(),
+            )
+        }
+    }
+
+    private fun renderFiles(session: SessionInfo, summaries: List<FileChangeSummary>) {
+        // The user may have navigated to a different session while this was computing in the
+        // background — a stale render for the wrong session would otherwise flash in.
+        if (currentSession != session) return
+        // Same dedup as renderSessions() — without this, every 3s poll tick tears down and rebuilds
+        // every row from scratch even when nothing changed, which reads as the list "flickering".
+        if (session == lastRenderedFileSession && summaries == lastRenderedFileSummaries) return
+        lastRenderedFileSession = session
+        lastRenderedFileSummaries = summaries
+
         filesListContainer.removeAll()
-        val summaries = DiffPresenter.fileSummaries(project, session)
         if (summaries.isEmpty()) {
             val empty = JLabel("No files in this project were touched", SwingConstants.CENTER)
             empty.foreground = UIManager.getColor("Label.disabledForeground")
-            empty.border = BorderFactory.createEmptyBorder(20, 0, 20, 0)
-            filesListContainer.add(empty)
+            empty.alignmentX = 0.5f
+            val emptyWrapper = JPanel()
+            emptyWrapper.isOpaque = false
+            emptyWrapper.layout = BoxLayout(emptyWrapper, BoxLayout.Y_AXIS)
+            emptyWrapper.add(Box.createVerticalStrut(60))
+            emptyWrapper.add(empty)
+            emptyWrapper.add(Box.createVerticalStrut(20))
+            filesListContainer.add(emptyWrapper)
         } else {
             summaries.forEachIndexed { i, summary ->
                 val nextRelpath = summaries.getOrNull(i + 1)?.relpath ?: summaries.getOrNull(i - 1)?.relpath

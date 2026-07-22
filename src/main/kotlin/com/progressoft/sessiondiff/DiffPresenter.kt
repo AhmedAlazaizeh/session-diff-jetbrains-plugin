@@ -35,11 +35,10 @@ object DiffPresenter {
     /** Change summary (added/deleted line counts, new/deleted/modified) for every file this session touched. */
     fun fileSummaries(project: Project, session: SessionInfo): List<FileChangeSummary> {
         val projectBasePath = project.basePath ?: return emptyList()
-        val editedFiles = SessionDiscoveryService.touchedFilesIn(session.transcriptPath)
+        val editedFiles = SessionDiscoveryService.touchedFilesIn(session.transcriptPath, projectBasePath)
         val bashDeletedFiles = SessionDiscoveryService.bashDeletedFilesIn(session.transcriptPath, projectBasePath)
         return (editedFiles + bashDeletedFiles)
             .mapNotNull { absolutePath -> summaryFor(session, projectBasePath, absolutePath) }
-            .filter { !DismissedFiles.isDismissed(session.sessionId, it.relpath) }
             .sortedBy { it.relpath }
     }
 
@@ -49,7 +48,7 @@ object DiffPresenter {
         val absolutePath = Path(projectBasePath, relpath).toString()
         val baseline = BaselineResolver.resolve(session, absolutePath, projectBasePath) as? Baseline.Found ?: return
         val currentFile = File(absolutePath)
-        if (!currentFile.exists()) return
+        if (!currentFile.isFile) return
         val afterBytes = currentFile.readBytes()
         if (isBinary(baseline.bytes) || isBinary(afterBytes)) return
 
@@ -79,7 +78,8 @@ object DiffPresenter {
         val absolutePath = Path(projectBasePath, relpath).toString()
         val baseline = BaselineResolver.resolve(session, absolutePath, projectBasePath) as? Baseline.Found ?: return
         val currentFile = File(absolutePath)
-        val afterExists = currentFile.exists()
+        if (currentFile.isDirectory) return
+        val afterExists = currentFile.isFile
 
         when {
             baseline.bytes.isEmpty() && afterExists -> {
@@ -99,7 +99,10 @@ object DiffPresenter {
                 WriteAction.run<Throwable> { virtualFile.setBinaryContent(baseline.bytes) }
             }
         }
-        DismissedFiles.dismiss(session.sessionId, relpath)
+        // Fingerprint the post-revert state, not a bare flag — if Claude touches this file again
+        // later in the same session, its content will no longer match and it reappears on its own.
+        val revertedBytes = if (currentFile.isFile) currentFile.readBytes() else ByteArray(0)
+        DismissedFiles.dismiss(session.sessionId, relpath, revertedBytes.contentHashCode().toLong())
     }
 
     private fun summaryFor(session: SessionInfo, projectBasePath: String, absolutePath: String): FileChangeSummary? {
@@ -117,8 +120,14 @@ object DiffPresenter {
             Baseline.Missing -> ByteArray(0)
         }
         val currentFile = File(absolutePath)
-        val afterExists = currentFile.exists()
+        val afterExists = currentFile.isFile
         val afterBytes = if (afterExists) currentFile.readBytes() else ByteArray(0)
+        // Fingerprint of the file's current content — if this still matches what it was when
+        // dismissed, nothing has touched it since and it stays hidden; if Claude edited it again,
+        // the fingerprint differs and it falls through to a fresh (likely PENDING) status below.
+        val currentFingerprint = afterBytes.contentHashCode().toLong()
+        if (DismissedFiles.isDismissed(session.sessionId, relpath, currentFingerprint)) return null
+
         val category = when {
             !afterExists && beforeBytes.isNotEmpty() -> ChangeCategory.DELETED
             beforeBytes.isEmpty() && afterExists -> ChangeCategory.NEW
@@ -149,6 +158,11 @@ object DiffPresenter {
             decisions.any { it == null } -> FileReviewStatus.PENDING
             decisions.any { it == HunkDecision.REJECTED } -> FileReviewStatus.HAS_REJECTIONS
             else -> FileReviewStatus.ACCEPTED
+        }
+        // Every hunk was resolved via the inline editor action bar, one at a time, with no bulk
+        // file-list button ever clicked — nothing left to review, so drop it like a whole-file Reject would.
+        if (reviewStatus != FileReviewStatus.PENDING) {
+            DismissedFiles.dismiss(session.sessionId, relpath, currentFingerprint)
         }
 
         return FileChangeSummary(relpath, category, added, deleted, isBinary = false, reviewStatus = reviewStatus)

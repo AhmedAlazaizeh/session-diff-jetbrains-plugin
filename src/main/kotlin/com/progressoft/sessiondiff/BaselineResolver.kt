@@ -6,6 +6,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.Path
 import kotlin.io.path.exists
@@ -64,32 +65,42 @@ object BaselineResolver {
         return historyFile.readBytes()
     }
 
-    private fun isInsideGitWorkTree(projectBasePath: String): Boolean {
-        return try {
-            val process = ProcessBuilder("git", "-C", projectBasePath, "rev-parse", "--is-inside-work-tree").start()
-            val finished = process.waitFor(2, TimeUnit.SECONDS)
-            finished && process.exitValue() == 0
-        } catch (e: IOException) {
-            false
+    // Spawning `git` blocks for up to 2s on a process the OS has to schedule — cheap to call once,
+    // expensive to call on every poll tick for every open file. Whether a project is a git work
+    // tree essentially never changes during a session, and per-path tracked status rarely does
+    // either, so cache both rather than re-spawning git repeatedly for the same answer.
+    private val gitWorkTreeCache = ConcurrentHashMap<String, Boolean>()
+    private val gitUntrackedCache = ConcurrentHashMap<String, Boolean>()
+
+    private fun isInsideGitWorkTree(projectBasePath: String): Boolean =
+        gitWorkTreeCache.getOrPut(projectBasePath) {
+            try {
+                val process = ProcessBuilder("git", "-C", projectBasePath, "rev-parse", "--is-inside-work-tree").start()
+                val finished = process.waitFor(2, TimeUnit.SECONDS)
+                finished && process.exitValue() == 0
+            } catch (e: IOException) {
+                false
+            }
         }
-    }
 
     private fun isGitUntracked(absolutePath: String, projectBasePath: String): Boolean {
         if (!isInsideGitWorkTree(projectBasePath)) return false
-        return try {
-            val process = ProcessBuilder("git", "-C", projectBasePath, "status", "--porcelain=v1", "--", absolutePath)
-                .redirectErrorStream(false)
-                .start()
-            val output = ByteArrayOutputStream()
-            process.inputStream.copyTo(output)
-            val finished = process.waitFor(2, TimeUnit.SECONDS)
-            if (!finished) {
-                process.destroyForcibly()
-                return false
+        return gitUntrackedCache.getOrPut("$projectBasePath|$absolutePath") {
+            try {
+                val process = ProcessBuilder("git", "-C", projectBasePath, "status", "--porcelain=v1", "--", absolutePath)
+                    .redirectErrorStream(false)
+                    .start()
+                val output = ByteArrayOutputStream()
+                process.inputStream.copyTo(output)
+                val finished = process.waitFor(2, TimeUnit.SECONDS)
+                if (!finished) {
+                    process.destroyForcibly()
+                    return@getOrPut false
+                }
+                output.toString().lines().any { it.startsWith("??") }
+            } catch (e: IOException) {
+                false
             }
-            output.toString().lines().any { it.startsWith("??") }
-        } catch (e: IOException) {
-            false
         }
     }
 
@@ -131,12 +142,13 @@ object BaselineResolver {
         }
 
         val currentFile = Path(absolutePath)
-        if (!currentFile.exists()) {
+        val isRegularFile = currentFile.exists() && currentFile.toFile().isFile
+        if (!isRegularFile) {
             val gitBytes = gitShowHead(absolutePath, projectBasePath)
             if (gitBytes != null) return Baseline.Found(gitBytes)
         }
 
-        val currentBytes = if (currentFile.exists()) currentFile.readBytes() else ByteArray(0)
+        val currentBytes = if (isRegularFile) currentFile.readBytes() else ByteArray(0)
         return if (isGitUntracked(absolutePath, projectBasePath)) {
             Baseline.UntrackedNoBaseline(currentBytes)
         } else {

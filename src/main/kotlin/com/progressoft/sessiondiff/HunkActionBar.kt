@@ -31,7 +31,7 @@ class HunkActionBar(
     baselineHunkText: String,
     currentHunkText: String,
     onDismiss: () -> Unit,
-) : JPanel(BorderLayout()) {
+) : JPanel(BorderLayout(12, 0)) {
 
     init {
         isOpaque = true
