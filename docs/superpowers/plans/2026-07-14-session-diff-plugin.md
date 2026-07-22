@@ -80,7 +80,7 @@ kotlin {
 ```properties
 org.gradle.jvmargs=-Xmx2g
 kotlin.code.style=official
-pluginGroup=com.progressoft.sessiondiff
+pluginGroup=com.ahmedalazaizeh.sessiondiff
 pluginVersion=0.1.0
 ```
 
@@ -88,7 +88,7 @@ pluginVersion=0.1.0
 
 ```xml
 <idea-plugin>
-  <id>com.progressoft.sessiondiff</id>
+  <id>com.ahmedalazaizeh.sessiondiff</id>
   <name>Claude Sessions</name>
   <vendor>Ahmad Alazaizeh</vendor>
   <description>Shows a diff of only what Claude Code changed in a session, in the native IDE diff viewer.</description>
@@ -100,7 +100,7 @@ pluginVersion=0.1.0
     <toolWindow id="Claude Sessions"
                 secondary="true"
                 anchor="left"
-                factoryClass="com.progressoft.sessiondiff.SessionListToolWindowFactory"/>
+                factoryClass="com.ahmedalazaizeh.sessiondiff.SessionListToolWindowFactory"/>
   </extensions>
 </idea-plugin>
 ```
@@ -131,13 +131,13 @@ git commit -m "chore: scaffold Gradle IntelliJ Platform plugin project"
 ### Task 2: Session discovery — parse transcripts, list sessions for current project
 
 **Files:**
-- Create: `src/main/kotlin/com/progressoft/sessiondiff/SessionInfo.kt`
-- Create: `src/main/kotlin/com/progressoft/sessiondiff/SessionDiscoveryService.kt`
+- Create: `src/main/kotlin/com/ahmedalazaizeh/sessiondiff/SessionInfo.kt`
+- Create: `src/main/kotlin/com/ahmedalazaizeh/sessiondiff/SessionDiscoveryService.kt`
 
 - [ ] **Step 1: Write `SessionInfo.kt`**
 
 ```kotlin
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import java.nio.file.Path
 
@@ -152,7 +152,7 @@ data class SessionInfo(
 - [ ] **Step 2: Write `SessionDiscoveryService.kt`**
 
 ```kotlin
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.google.gson.JsonParser
 import com.google.gson.JsonSyntaxException
@@ -268,7 +268,7 @@ Expected: `BUILD SUCCESSFUL`
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/main/kotlin/com/progressoft/sessiondiff/SessionInfo.kt src/main/kotlin/com/progressoft/sessiondiff/SessionDiscoveryService.kt
+git add src/main/kotlin/com/ahmedalazaizeh/sessiondiff/SessionInfo.kt src/main/kotlin/com/ahmedalazaizeh/sessiondiff/SessionDiscoveryService.kt
 git commit -m "feat: parse Claude Code transcripts into session list"
 ```
 
@@ -277,13 +277,13 @@ git commit -m "feat: parse Claude Code transcripts into session list"
 ### Task 3: Tool window — list sessions, live-refresh on transcript changes
 
 **Files:**
-- Create: `src/main/kotlin/com/progressoft/sessiondiff/SessionListToolWindowFactory.kt`
-- Create: `src/main/kotlin/com/progressoft/sessiondiff/SessionListPanel.kt`
+- Create: `src/main/kotlin/com/ahmedalazaizeh/sessiondiff/SessionListToolWindowFactory.kt`
+- Create: `src/main/kotlin/com/ahmedalazaizeh/sessiondiff/SessionListPanel.kt`
 
 - [ ] **Step 1: Write `SessionListPanel.kt`**
 
 ```kotlin
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.openapi.project.Project
 import com.intellij.ui.components.JBList
@@ -329,7 +329,7 @@ class SessionListPanel(private val project: Project) : JPanel(BorderLayout()) {
 Uses `Path.startsWith`, not raw `String.startsWith` — project path encoding just swaps `/` for `-`, so two different projects can share a long string prefix (e.g. `-home-ahmad-foo` and `-home-ahmad-foobar`); a naive string-prefix check would cross-trigger a refresh between unrelated projects. `Path.startsWith` compares path segments, not characters, so it doesn't have this false-positive.
 
 ```kotlin
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.AsyncFileListener
@@ -373,7 +373,7 @@ Expected: `BUILD SUCCESSFUL`
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/main/kotlin/com/progressoft/sessiondiff/SessionListToolWindowFactory.kt src/main/kotlin/com/progressoft/sessiondiff/SessionListPanel.kt
+git add src/main/kotlin/com/ahmedalazaizeh/sessiondiff/SessionListToolWindowFactory.kt src/main/kotlin/com/ahmedalazaizeh/sessiondiff/SessionListPanel.kt
 git commit -m "feat: add Claude Sessions tool window with live refresh"
 ```
 
@@ -382,14 +382,14 @@ git commit -m "feat: add Claude Sessions tool window with live refresh"
 ### Task 4: Baseline resolver — own store, checkpoint fallback, untracked-file warning
 
 **Files:**
-- Create: `src/main/kotlin/com/progressoft/sessiondiff/BaselineResolver.kt`
+- Create: `src/main/kotlin/com/ahmedalazaizeh/sessiondiff/BaselineResolver.kt`
 
 - [ ] **Step 1: Write `BaselineResolver.kt`**
 
 `isGitUntracked` checks `git rev-parse --is-inside-work-tree` before running `git status`, matching `session-diff.py`'s `git_untracked()` — this keeps "not a git repo" (expected, return not-untracked cleanly) distinct from a genuinely broken git invocation, which the original blanket `catch (e: Exception)` would have collapsed into the same silent `Baseline.Missing` outcome with no warning at all. Both git subprocess calls use a 2-second `waitFor` timeout, since this runs synchronously on the UI click-handler path (`SessionListPanel` → `DiffPresenter` → `BaselineResolver`) — an unbounded `waitFor()` would hang the IDE if git ever stalled.
 
 ```kotlin
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.google.gson.JsonParser
 import java.io.ByteArrayOutputStream
@@ -514,7 +514,7 @@ Expected: `BUILD SUCCESSFUL`
 - [ ] **Step 3: Commit**
 
 ```bash
-git add src/main/kotlin/com/progressoft/sessiondiff/BaselineResolver.kt
+git add src/main/kotlin/com/ahmedalazaizeh/sessiondiff/BaselineResolver.kt
 git commit -m "feat: resolve pre-edit baselines with git-untracked fallback"
 ```
 
@@ -523,15 +523,15 @@ git commit -m "feat: resolve pre-edit baselines with git-untracked fallback"
 ### Task 5: Diff presenter — build native multi-file diff from resolved baselines
 
 **Files:**
-- Create: `src/main/kotlin/com/progressoft/sessiondiff/BashWarningDetector.kt`
-- Create: `src/main/kotlin/com/progressoft/sessiondiff/DiffPresenter.kt`
+- Create: `src/main/kotlin/com/ahmedalazaizeh/sessiondiff/BashWarningDetector.kt`
+- Create: `src/main/kotlin/com/ahmedalazaizeh/sessiondiff/DiffPresenter.kt`
 
 - [ ] **Step 1: Write `BashWarningDetector.kt`**
 
 Kotlin port of `session-diff.py`'s `DESTRUCTIVE_BASH_RE` — Bash-driven `rm`/`mv`/`git mv` isn't checkpointed by anything (not our own hook, not Claude Code's own checkpointing), so these can only ever be flagged, never diffed.
 
 ```kotlin
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.google.gson.JsonParser
 import java.io.File
@@ -570,7 +570,7 @@ object BashWarningDetector {
 Uses `DiffContentFactory.createFromBytes(...)`, not `String(bytes)` + `create(...)` — `String(ByteArray)` decodes using the JVM's platform-default charset, which silently mis-renders any file that isn't in that charset (non-ASCII content, legacy encodings). `createFromBytes` does its own charset detection from the actual bytes, the same way the editor does. Also calls the shared `SessionDiscoveryService.touchedFilesIn(...)` from Task 2 instead of duplicating that parsing logic locally — the original draft had its own private `touchedFilesFor`, byte-for-byte identical to `SessionDiscoveryService`'s scan; consolidated after code review flagged the duplicate-parsing drift risk.
 
 ```kotlin
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
@@ -675,7 +675,7 @@ Expected: `BUILD SUCCESSFUL`
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/kotlin/com/progressoft/sessiondiff/DiffPresenter.kt src/main/kotlin/com/progressoft/sessiondiff/BashWarningDetector.kt src/main/resources/META-INF/plugin.xml
+git add src/main/kotlin/com/ahmedalazaizeh/sessiondiff/DiffPresenter.kt src/main/kotlin/com/ahmedalazaizeh/sessiondiff/BashWarningDetector.kt src/main/resources/META-INF/plugin.xml
 git commit -m "feat: open native multi-file diff on session click, flag Bash deletes/moves"
 ```
 
@@ -736,14 +736,14 @@ git commit -m "fix: address issues found during manual verification"
 - [ ] **Step 1: Create the private repo**
 
 ```bash
-GITLAB_HOST=gitlab.progressoft.io glab repo create session-diff-jetbrains-plugin --private --description "IntelliJ Platform plugin: session-scoped diff viewer for Claude Code"
+GITLAB_HOST=git.example.com glab repo create session-diff-jetbrains-plugin --private --description "IntelliJ Platform plugin: session-scoped diff viewer for Claude Code"
 ```
 Expected: `✓ Created project on GitLab: ... session-diff-jetbrains-plugin`
 
 - [ ] **Step 2: Add the remote and push**
 
 ```bash
-git remote add origin git@gitlab.progressoft.io:ps.Ahmad.Alazaizeh/session-diff-jetbrains-plugin.git
+git remote add origin git@git.example.com:ps.Ahmad.Alazaizeh/session-diff-jetbrains-plugin.git
 git branch -M main
 git push -u origin main
 ```
@@ -752,6 +752,6 @@ Expected: push succeeds (watch for the same commit-message-format pre-receive ho
 - [ ] **Step 3: Verify**
 
 ```bash
-GITLAB_HOST=gitlab.progressoft.io glab repo view ps.Ahmad.Alazaizeh/session-diff-jetbrains-plugin
+GITLAB_HOST=git.example.com glab repo view ps.Ahmad.Alazaizeh/session-diff-jetbrains-plugin
 ```
 Expected: shows the repo name and description, confirming the push landed correctly.

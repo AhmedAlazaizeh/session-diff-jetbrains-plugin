@@ -1,4 +1,4 @@
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.diff.comparison.ComparisonManager
 import com.intellij.diff.comparison.ComparisonPolicy
@@ -24,11 +24,11 @@ import java.awt.Color
 import kotlin.io.path.Path
 
 private val NEW_LINE_BACKGROUND = JBColor(Color(226, 246, 226), Color(43, 66, 43))
-private val MARKERS_KEY = Key.create<MutableList<() -> Unit>>("com.progressoft.sessiondiff.markers")
+private val MARKERS_KEY = Key.create<MutableList<() -> Unit>>("com.ahmedalazaizeh.sessiondiff.markers")
 // What was last actually applied to this editor — lets refreshAllEditorsFor skip clearing and
 // recreating every inlay/highlighter/action-bar on every 3s poll tick when nothing changed, which
 // otherwise reads as the whole hunk flickering/refreshing even though nothing is actually different.
-private val SIGNATURE_KEY = Key.create<String>("com.progressoft.sessiondiff.signature")
+private val SIGNATURE_KEY = Key.create<String>("com.ahmedalazaizeh.sessiondiff.signature")
 
 /**
  * Only the ACTIVE session gets inline markers — two overlapping sessions touching the same file

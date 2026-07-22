@@ -3,7 +3,7 @@
 ## Context
 
 `session-diff` (the existing Claude Code CLI tool, at
-`gitlab.progressoft.io/ps.Ahmad.Alazaizeh/session-diff`) already shows a diff
+`git.example.com/ps.Ahmad.Alazaizeh/session-diff`) already shows a diff
 of only what Claude changed in a session, opened in the JetBrains diff
 viewer via shelling out to `idea diff before/ after/`. It works, but every
 invocation needs a trigger (`/session-diff`, `!csdiff`, or the `csdiff` shell
@@ -126,7 +126,7 @@ regression cases already exercised building the CLI tool:
 
 ## Distribution
 
-New repo: `gitlab.progressoft.io/ps.Ahmad.Alazaizeh/session-diff-jetbrains-plugin`
+New repo: `git.example.com/ps.Ahmad.Alazaizeh/session-diff-jetbrains-plugin`
 (private — same visibility constraint as before, "internal" is blocked by
 GitLab admin policy). Not published to JetBrains Marketplace. Built via
 Gradle, installed manually via Settings → Plugins → Install Plugin from

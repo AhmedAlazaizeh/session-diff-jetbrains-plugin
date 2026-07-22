@@ -1,4 +1,4 @@
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 enum class ChangeCategory { NEW, DELETED, MODIFIED }
 

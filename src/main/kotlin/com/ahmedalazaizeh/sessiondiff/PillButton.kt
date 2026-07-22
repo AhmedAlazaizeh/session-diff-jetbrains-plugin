@@ -1,4 +1,4 @@
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import java.awt.Color
 import java.awt.Cursor

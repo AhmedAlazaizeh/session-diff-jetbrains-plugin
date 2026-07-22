@@ -1,4 +1,4 @@
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.google.gson.JsonParser
 import java.io.File

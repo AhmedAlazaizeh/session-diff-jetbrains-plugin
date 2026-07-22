@@ -1,4 +1,4 @@
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Editor

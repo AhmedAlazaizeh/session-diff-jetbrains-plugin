@@ -1,4 +1,4 @@
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationGroupManager

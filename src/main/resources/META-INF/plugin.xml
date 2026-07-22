@@ -1,7 +1,7 @@
 <idea-plugin require-restart="true">
-  <id>com.progressoft.sessiondiff</id>
+  <id>com.ahmedalazaizeh.sessiondiff</id>
   <name>Claude Sessions</name>
-  <vendor email="ahmad.alazaizeh@progressoft.com">Ahmad Alazaizeh</vendor>
+  <vendor>Ahmad Alazaizeh</vendor>
   <description><![CDATA[
     Shows exactly what <a href="https://claude.com/claude-code">Claude Code</a> changed in a session —
     never mixed up with your own uncommitted edits.
@@ -17,6 +17,7 @@
   ]]></description>
   <change-notes><![CDATA[
     <ul>
+      <li>0.2.6: plugin ID changed to com.ahmedalazaizeh.sessiondiff (was com.progressoft.sessiondiff)</li>
       <li>0.2.5: fixed IDE lag from this plugin's polling (disk/git work off the EDT, cached transcript
           scans, memoized git checks); dismissed sessions/files now reappear once actually touched
           again instead of staying hidden forever; fixed inline markers and the file list rebuilding
@@ -42,8 +43,8 @@
                 secondary="true"
                 anchor="left"
                 icon="/icons/toolWindowSessionDiff.svg"
-                factoryClass="com.progressoft.sessiondiff.SessionListToolWindowFactory"/>
+                factoryClass="com.ahmedalazaizeh.sessiondiff.SessionListToolWindowFactory"/>
     <notificationGroup id="Claude Sessions" displayType="BALLOON"/>
-    <editorFactoryListener implementation="com.progressoft.sessiondiff.LatestSessionGutterListener"/>
+    <editorFactoryListener implementation="com.ahmedalazaizeh.sessiondiff.LatestSessionGutterListener"/>
   </extensions>
 </idea-plugin>

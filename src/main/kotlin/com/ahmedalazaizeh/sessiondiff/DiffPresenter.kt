@@ -1,4 +1,4 @@
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.chains.SimpleDiffRequestChain

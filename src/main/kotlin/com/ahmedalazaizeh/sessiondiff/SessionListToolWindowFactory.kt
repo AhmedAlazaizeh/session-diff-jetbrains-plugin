@@ -1,4 +1,4 @@
-package com.progressoft.sessiondiff
+package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.AsyncFileListener
