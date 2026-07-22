@@ -2,6 +2,7 @@ package com.ahmedalazaizeh.sessiondiff
 
 import com.intellij.diff.comparison.ComparisonManager
 import com.intellij.diff.comparison.ComparisonPolicy
+import com.intellij.diff.fragments.DiffFragment
 import com.intellij.diff.fragments.LineFragment
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -14,6 +15,7 @@ import com.intellij.openapi.editor.ex.EditorEx
 import com.intellij.openapi.editor.impl.EditorEmbeddedComponentManager
 import com.intellij.openapi.editor.markup.HighlighterLayer
 import com.intellij.openapi.editor.markup.HighlighterTargetArea
+import com.intellij.openapi.editor.markup.LineMarkerRenderer
 import com.intellij.openapi.editor.markup.TextAttributes
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.EmptyProgressIndicator
@@ -23,8 +25,36 @@ import com.intellij.ui.JBColor
 import java.awt.Color
 import kotlin.io.path.Path
 
-private val NEW_LINE_BACKGROUND = JBColor(Color(226, 246, 226), Color(43, 66, 43))
-private val WORD_HIGHLIGHT_BACKGROUND = JBColor(Color(255, 224, 130), Color(92, 74, 26))
+// Used only for the gutter strip (a small solid indicator, not a text wash) — green for a changed
+// live line. Old/removed content is neutral grey (see below), not red.
+val INSERTED_COLOR = JBColor(Color(30, 150, 70), Color(90, 200, 120))
+
+// All four picked directly from a real IntelliJ diff (dark theme) with a color picker — used as
+// solid fills rather than alpha-blended, so they're an exact match regardless of what the actual
+// editor background turns out to be. Light-theme values are derived (not measured) since only dark
+// was checked.
+val INSERTED_WORD_EMPHASIS_COLOR = JBColor(Color(140, 201, 161), Color(41, 68, 54))
+val INSERTED_LINE_BACKGROUND_COLOR = JBColor(Color(188, 224, 200), Color(41, 52, 50))
+val DELETED_LINE_BACKGROUND_COLOR = JBColor(Color(233, 233, 235), Color(53, 55, 58))
+val DELETED_WORD_EMPHASIS_COLOR = JBColor(Color(214, 214, 214), Color(72, 74, 74))
+
+// The gutter strip is a small indicator, not a wash over readable text, so it can stay fairly solid.
+const val GUTTER_STRIP_ALPHA = 150
+
+/** Same [color], just with [alpha] swapped in — used to derive the wash/emphasis pair from a single base color. */
+fun withAlpha(color: Color, alpha: Int): Color = Color(color.red, color.green, color.blue, alpha)
+
+/**
+ * Extends [color] into the gutter's line-marker strip (the same narrow column VCS paints its own
+ * change bars in, just left of the line numbers) — same mechanism, just our own color. Only
+ * meaningful for a highlighter on a real document line; the ghost (old) lines rendered above them
+ * are synthetic inlay content with no real gutter row to paint into.
+ */
+fun gutterStripRenderer(color: Color): LineMarkerRenderer = LineMarkerRenderer { _, g, r ->
+    g.color = withAlpha(color, GUTTER_STRIP_ALPHA)
+    g.fillRect(r.x, r.y, r.width, r.height)
+}
+
 private val MARKERS_KEY = Key.create<MutableList<() -> Unit>>("com.ahmedalazaizeh.sessiondiff.markers")
 // What was last actually applied to this editor — lets refreshAllEditorsFor skip clearing and
 // recreating every inlay/highlighter/action-bar on every 3s poll tick when nothing changed, which
@@ -38,11 +68,12 @@ private val SIGNATURE_KEY = Key.create<String>("com.ahmedalazaizeh.sessiondiff.s
  * (ActiveSessionStore) — [refreshAllEditorsFor] re-runs this on every open editor when that changes,
  * since markers are otherwise only computed once, when an editor is created.
  *
- * A one-line edit renders git `--word-diff` style: only the changed word/phrase gets a highlight,
- * with the removed word struck through inline right next to it — not a separate ghost line. Multi-line
- * hunks and pure add/delete fall back to a whole-line treatment (struck-through ghost block above,
- * highlighted block below). Either way, a Keep/Reject/Show Diff action bar (a real embedded Swing
- * panel, not just a gutter icon) sits below each hunk.
+ * Matches IntelliJ's own local-changes diff popup: a line modified in place shows its old text above
+ * and current text below, both in normal color, with only the actually-changed word/phrase called out
+ * via a highlight — not the whole line struck through or flooded green. Pure add/delete (or a change
+ * too different to align word-by-word) falls back to a whole-line treatment instead. Either way, a
+ * Keep/Reject/Show Diff action bar (a real embedded Swing panel, not just a gutter icon) sits below
+ * each hunk.
  */
 class LatestSessionGutterListener : EditorFactoryListener {
 
@@ -126,7 +157,11 @@ class LatestSessionGutterListener : EditorFactoryListener {
             // is fine to call from the pooled thread refreshAllEditorsFor computes plans on.
             val afterText = editor.document.text
 
-            val fragments = ComparisonManager.getInstance().compareLines(
+            // compareLinesInner (not plain compareLines) additionally computes each fragment's
+            // character-level innerFragments where the old/new text can be sensibly aligned word by
+            // word — that's what lets applyPlan render precise word highlights instead of whole-line
+            // color for a line modified in place.
+            val fragments = ComparisonManager.getInstance().compareLinesInner(
                 beforeText, afterText, ComparisonPolicy.DEFAULT, EmptyProgressIndicator(),
             )
             if (fragments.isEmpty()) return null
@@ -162,34 +197,66 @@ class LatestSessionGutterListener : EditorFactoryListener {
                 val hasNewText = fragment.startOffset2 != fragment.endOffset2
                 val disposables = mutableListOf<() -> Unit>()
 
-                // Word-level inline diff (git --word-diff style) only makes sense for a genuine
-                // one-line-to-one-line edit — multi-line hunks and pure add/delete fall back to the
-                // whole-line ghost-block-above + full-line-highlight-below treatment.
-                val isSingleLineModification = hasOldText && hasNewText &&
-                    '\n' !in hunkBaselineText && '\n' !in hunkCurrentText
+                // innerFragments is only non-null where the platform found the old/new text sensibly
+                // alignable word-by-word (a line — or several — modified in place). Pure add/delete,
+                // or a change too different to align, gets the whole-line treatment instead. The
+                // platform sometimes still returns innerFragments even when most of the line differs
+                // (e.g. a renamed method plus a new argument) — in that case the "precise" word
+                // highlight ends up covering nearly the whole line anyway, which just looks like a
+                // solid wash with no useful contrast, so treat that as unalignable too.
+                val innerFragments = fragment.innerFragments
+                    ?.takeIf { isWordLevelAlignmentUseful(it, hunkBaselineText, hunkCurrentText) }
 
-                if (isSingleLineModification) {
-                    val innerFragments = ComparisonManager.getInstance().compareWords(
-                        hunkBaselineText, hunkCurrentText, ComparisonPolicy.DEFAULT, EmptyProgressIndicator(),
-                    )
+                if (innerFragments != null && hasOldText && hasNewText) {
+                    val oldLines = hunkBaselineText.removeSuffix("\n").split("\n")
+                    val oldRangesPerLine = List(oldLines.size) { mutableListOf<IntRange>() }
+                    // A pure insertion (something added with nothing removed at that spot) is a
+                    // zero-width range on the old side — splitRangeAcrossLines drops those, so track
+                    // them separately as insertion points instead of just losing them silently.
+                    val oldInsertionPointsPerLine = List(oldLines.size) { mutableListOf<Int>() }
                     innerFragments.forEach { inner ->
-                        val oldWord = hunkBaselineText.substring(inner.startOffset1, inner.endOffset1)
-                        if (oldWord.isNotEmpty()) {
-                            val insertAt = fragment.startOffset2 + inner.startOffset2
-                            val wordInlay = plan.editor.inlayModel.addInlineElement(
-                                insertAt, false, OldWordInlineRenderer(oldWord),
-                            )
-                            if (wordInlay != null) {
-                                disposables.add { wordInlay.dispose() }
-                                editorWideDisposables.add { wordInlay.dispose() }
-                            }
+                        if (inner.startOffset1 == inner.endOffset1 && inner.startOffset2 != inner.endOffset2) {
+                            val (lineIndex, col) = pointToLineColumn(hunkBaselineText, inner.startOffset1)
+                            oldInsertionPointsPerLine.getOrNull(lineIndex)?.add(col)
+                        } else {
+                            splitRangeAcrossLines(hunkBaselineText, inner.startOffset1, inner.endOffset1)
+                                .forEach { (lineIndex, startCol, endCol) -> oldRangesPerLine[lineIndex].add(startCol until endCol) }
                         }
+                    }
+                    if (oldRangesPerLine.any { it.isNotEmpty() } || oldInsertionPointsPerLine.any { it.isNotEmpty() }) {
+                        val ghostInlay = plan.editor.inlayModel.addBlockElement(
+                            fragment.startOffset2, false, true, 0,
+                            OldLinesWithHighlightsRenderer(oldLines, oldRangesPerLine, oldInsertionPointsPerLine),
+                        )
+                        if (ghostInlay != null) {
+                            disposables.add { ghostInlay.dispose() }
+                            editorWideDisposables.add { ghostInlay.dispose() }
+                        }
+                    }
+
+                    // Same two-tone treatment IntelliJ's own diff popup uses: a faint whole-line wash
+                    // in the side's own color (green for the new/current line), plus a stronger dose
+                    // of that same color on just the word(s) that actually changed — not a separate
+                    // neutral highlight color unrelated to add/remove.
+                    val insertedColor: Color = INSERTED_COLOR
+                    val lineWash = markup.addRangeHighlighter(
+                        fragment.startOffset2,
+                        fragment.endOffset2,
+                        HighlighterLayer.WARNING,
+                        TextAttributes(null, INSERTED_LINE_BACKGROUND_COLOR, null, null, 0),
+                        HighlighterTargetArea.LINES_IN_RANGE,
+                    )
+                    lineWash.lineMarkerRenderer = gutterStripRenderer(insertedColor)
+                    disposables.add { markup.removeHighlighter(lineWash) }
+                    editorWideDisposables.add { markup.removeHighlighter(lineWash) }
+
+                    innerFragments.forEach { inner ->
                         if (inner.startOffset2 != inner.endOffset2) {
                             val highlighter = markup.addRangeHighlighter(
                                 fragment.startOffset2 + inner.startOffset2,
                                 fragment.startOffset2 + inner.endOffset2,
                                 HighlighterLayer.LAST,
-                                TextAttributes(null, WORD_HIGHLIGHT_BACKGROUND, null, null, 0),
+                                TextAttributes(null, INSERTED_WORD_EMPHASIS_COLOR, null, null, 0),
                                 HighlighterTargetArea.EXACT_RANGE,
                             )
                             disposables.add { markup.removeHighlighter(highlighter) }
@@ -212,9 +279,10 @@ class LatestSessionGutterListener : EditorFactoryListener {
                             fragment.startOffset2,
                             fragment.endOffset2,
                             HighlighterLayer.LAST,
-                            TextAttributes(null, NEW_LINE_BACKGROUND, null, null, 0),
+                            TextAttributes(null, INSERTED_LINE_BACKGROUND_COLOR, null, null, 0),
                             HighlighterTargetArea.LINES_IN_RANGE,
                         )
+                        highlighter.lineMarkerRenderer = gutterStripRenderer(INSERTED_COLOR)
                         disposables.add { markup.removeHighlighter(highlighter) }
                         editorWideDisposables.add { markup.removeHighlighter(highlighter) }
                     }
@@ -246,6 +314,57 @@ class LatestSessionGutterListener : EditorFactoryListener {
             }
 
             plan.editor.putUserData(MARKERS_KEY, editorWideDisposables)
+        }
+
+        /**
+         * True when the differing spans are a minority of both the old and new text — worth
+         * highlighting precisely. False when most of the line changed anyway (a rename plus new
+         * argument, say), where a "precise" highlight would just cover almost the whole line with
+         * no real contrast against the wash underneath it.
+         */
+        private fun isWordLevelAlignmentUseful(innerFragments: List<DiffFragment>, oldText: String, newText: String): Boolean {
+            val oldChanged = innerFragments.sumOf { it.endOffset1 - it.startOffset1 }
+            val newChanged = innerFragments.sumOf { it.endOffset2 - it.startOffset2 }
+            val oldRatio = if (oldText.isEmpty()) 0.0 else oldChanged.toDouble() / oldText.length
+            val newRatio = if (newText.isEmpty()) 0.0 else newChanged.toDouble() / newText.length
+            return oldRatio < 0.6 && newRatio < 0.6
+        }
+
+        /** Converts an absolute [offset] within [text] into a (lineIndex, column) pair. */
+        private fun pointToLineColumn(text: String, offset: Int): Pair<Int, Int> {
+            var lineStart = 0
+            var lineIndex = 0
+            while (true) {
+                val newlineIndex = text.indexOf('\n', lineStart)
+                val lineEnd = if (newlineIndex == -1) text.length else newlineIndex
+                if (newlineIndex == -1 || offset <= lineEnd) return lineIndex to (offset - lineStart).coerceIn(0, lineEnd - lineStart)
+                lineStart = newlineIndex + 1
+                lineIndex++
+            }
+        }
+
+        /**
+         * Converts an absolute [start]..[end] offset range within [text] into per-line
+         * (lineIndex, startCol, endCol) triples, splitting at each line boundary the range spans.
+         */
+        private fun splitRangeAcrossLines(text: String, start: Int, end: Int): List<Triple<Int, Int, Int>> {
+            if (start >= end) return emptyList()
+            val result = mutableListOf<Triple<Int, Int, Int>>()
+            var lineStart = 0
+            var lineIndex = 0
+            while (lineStart <= text.length) {
+                val newlineIndex = text.indexOf('\n', lineStart)
+                val lineEnd = if (newlineIndex == -1) text.length else newlineIndex
+                val rangeStart = maxOf(start, lineStart)
+                val rangeEnd = minOf(end, lineEnd)
+                if (rangeStart < rangeEnd) {
+                    result.add(Triple(lineIndex, rangeStart - lineStart, rangeEnd - lineStart))
+                }
+                if (newlineIndex == -1) break
+                lineStart = newlineIndex + 1
+                lineIndex++
+            }
+            return result
         }
     }
 }

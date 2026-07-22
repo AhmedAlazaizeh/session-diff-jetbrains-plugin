@@ -17,6 +17,10 @@
   ]]></description>
   <change-notes><![CDATA[
     <ul>
+      <li>0.2.8: inline word-diff colors reworked to match IntelliJ's native diff popup exactly (colors
+          picked from the real thing): grey wash/emphasis for old/removed content, green for new/added,
+          a gutter strip on the live line, and a caret marker for pure insertion points; word-level
+          highlighting now falls back to whole-line when most of the line changed anyway</li>
       <li>0.2.7: single-line edits now render as an inline word-diff (changed word highlighted, old
           word struck through right next to it) instead of a whole-line ghost block; warns when a
           file's diff also includes a later session's changes, instead of silently mixing them</li>

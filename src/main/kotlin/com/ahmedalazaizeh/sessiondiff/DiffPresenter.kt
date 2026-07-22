@@ -189,11 +189,11 @@ object DiffPresenter {
         if (relpaths.isEmpty()) return
         val index = relpaths.indexOf(relpath).coerceAtLeast(0).coerceAtMost(relpaths.size - 1)
 
-        warnAboutOverlappingSessions(project, projectBasePath, session, relpaths)
+        val overrides = overlapOverridesFor(project, projectBasePath, session, relpaths)
 
         sessionDiffFiles[session.sessionId]?.let { FileEditorManager.getInstance(project).closeFile(it) }
 
-        val requests = relpaths.mapNotNull { buildRequest(project, session, projectBasePath, it) }
+        val requests = relpaths.mapNotNull { buildRequest(project, session, projectBasePath, it, overrides[it]) }
         if (requests.isEmpty()) return
         val chain = SimpleDiffRequestChain(requests, index)
         val virtualFile = ChainDiffVirtualFile(chain, session.title)
@@ -202,17 +202,22 @@ object DiffPresenter {
     }
 
     /**
-     * "Before" is this session's own baseline, but "after" is always the live file on disk — if a
-     * later session also touched the same file since, that session's edits are baked into "after"
-     * too, with no way to tell them apart from this session's own. There's no reliable snapshot of
-     * "the file exactly as this session left it" to compare against instead (would need Claude
-     * Code's own checkpoint versioning to expose a per-session end-state, which it doesn't appear
-     * to), so the best honest option is a clear warning rather than a silently misleading diff.
+     * "Before" is this session's own baseline, but "after" is always the live file on disk by
+     * default — if a later session also touched the same file since, that session's edits would be
+     * baked into "after" too. For files where that's the case, replay [TranscriptReplay] to
+     * reconstruct this session's own end-state instead of using the live file; where replay can't
+     * do that reliably (e.g. a NotebookEdit is mixed in), fall back to a warning rather than a
+     * silently misleading diff.
      */
-    private fun warnAboutOverlappingSessions(project: Project, projectBasePath: String, session: SessionInfo, relpaths: List<String>) {
-        val laterSessions = SessionDiscoveryService.listSessions(projectBasePath)
-            .filter { it.sessionId != session.sessionId && it.startTimeMillis > session.startTimeMillis }
-        if (laterSessions.isEmpty()) return
+    private fun overlapOverridesFor(
+        project: Project,
+        projectBasePath: String,
+        session: SessionInfo,
+        relpaths: List<String>,
+    ): Map<String, ByteArray> {
+        val allSessions = SessionDiscoveryService.listSessions(projectBasePath)
+        val laterSessions = allSessions.filter { it.sessionId != session.sessionId && it.startTimeMillis > session.startTimeMillis }
+        if (laterSessions.isEmpty()) return emptyMap()
 
         val overlapping = relpaths.filter { rp ->
             val absolutePath = Path(projectBasePath, rp).toString()
@@ -221,19 +226,45 @@ object DiffPresenter {
                     absolutePath in SessionDiscoveryService.bashDeletedFilesIn(later.transcriptPath, projectBasePath)
             }
         }
-        if (overlapping.isEmpty()) return
+        if (overlapping.isEmpty()) return emptyMap()
 
-        notify(
-            project,
-            "Diff includes a later session's changes too",
-            "Also touched after this session by another one: ${overlapping.joinToString(", ")}. " +
-                "The diff compares this session's starting point against the file's current content, " +
-                "which includes everything done since — not just this session's own edits.",
-            NotificationType.WARNING,
-        )
+        val overrides = mutableMapOf<String, ByteArray>()
+        val unresolved = mutableListOf<String>()
+        overlapping.forEach { rp ->
+            val absolutePath = Path(projectBasePath, rp).toString()
+            val reconstructed = TranscriptReplay.reconstructEndOfSession(allSessions, session, absolutePath, projectBasePath)
+            if (reconstructed != null) overrides[rp] = reconstructed else unresolved.add(rp)
+        }
+
+        if (overrides.isNotEmpty()) {
+            notify(
+                project,
+                "Diff reconstructed to this session's own changes",
+                "Also touched afterward by another session: ${overrides.keys.joinToString(", ")}. " +
+                    "Showing this session's own edits only, replayed from the transcript — not the file's current content.",
+                NotificationType.INFORMATION,
+            )
+        }
+        if (unresolved.isNotEmpty()) {
+            notify(
+                project,
+                "Diff includes a later session's changes too",
+                "Couldn't isolate this session's own edits for: ${unresolved.joinToString(", ")} " +
+                    "(likely a notebook edit in the mix). Diff shown is against the file's current " +
+                    "content, which includes the later session's changes too.",
+                NotificationType.WARNING,
+            )
+        }
+        return overrides
     }
 
-    private fun buildRequest(project: Project, session: SessionInfo, projectBasePath: String, relpath: String): SimpleDiffRequest? {
+    private fun buildRequest(
+        project: Project,
+        session: SessionInfo,
+        projectBasePath: String,
+        relpath: String,
+        overrideAfterBytes: ByteArray?,
+    ): SimpleDiffRequest? {
         val absolutePath = Path(projectBasePath, relpath).toString()
         val baseline = BaselineResolver.resolve(session, absolutePath, projectBasePath)
         val beforeBytes = when (baseline) {
@@ -257,13 +288,19 @@ object DiffPresenter {
             // createFromBytes does its own charset detection from the actual bytes —
             // String(bytes) would silently use the JVM's platform-default charset instead.
             val before = diffContentFactory.createFromBytes(project, beforeBytes, fileType, "before/$relpath")
-            // createFile ties the content to the real VirtualFile — required for "Go to Source" to
-            // work in the diff viewer. createFromBytes always produces synthetic, non-navigable content.
-            val virtualFile = LocalFileSystem.getInstance().findFileByIoFile(currentFile)
-            val after: DiffContent = if (virtualFile != null) {
-                diffContentFactory.createFile(project, virtualFile)!!
+            val after: DiffContent = if (overrideAfterBytes != null) {
+                // Reconstructed end-of-session content, not the live file — no VirtualFile backing,
+                // so "Go to Source" navigation won't work here, same trade-off as any synthetic content.
+                diffContentFactory.createFromBytes(project, overrideAfterBytes, fileType, "after/$relpath")
             } else {
-                diffContentFactory.createFromBytes(project, ByteArray(0), fileType, "after/$relpath")
+                // createFile ties the content to the real VirtualFile — required for "Go to Source" to
+                // work in the diff viewer. createFromBytes always produces synthetic, non-navigable content.
+                val virtualFile = LocalFileSystem.getInstance().findFileByIoFile(currentFile)
+                if (virtualFile != null) {
+                    diffContentFactory.createFile(project, virtualFile)!!
+                } else {
+                    diffContentFactory.createFromBytes(project, ByteArray(0), fileType, "after/$relpath")
+                }
             }
             before to after
         } catch (e: IOException) {
