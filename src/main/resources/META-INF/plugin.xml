@@ -17,6 +17,9 @@
   ]]></description>
   <change-notes><![CDATA[
     <ul>
+      <li>0.2.7: single-line edits now render as an inline word-diff (changed word highlighted, old
+          word struck through right next to it) instead of a whole-line ghost block; warns when a
+          file's diff also includes a later session's changes, instead of silently mixing them</li>
       <li>0.2.6: plugin ID changed to com.ahmedalazaizeh.sessiondiff (was com.progressoft.sessiondiff)</li>
       <li>0.2.5: fixed IDE lag from this plugin's polling (disk/git work off the EDT, cached transcript
           scans, memoized git checks); dismissed sessions/files now reappear once actually touched

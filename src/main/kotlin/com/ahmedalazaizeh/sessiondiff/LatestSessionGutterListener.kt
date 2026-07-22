@@ -24,6 +24,7 @@ import java.awt.Color
 import kotlin.io.path.Path
 
 private val NEW_LINE_BACKGROUND = JBColor(Color(226, 246, 226), Color(43, 66, 43))
+private val WORD_HIGHLIGHT_BACKGROUND = JBColor(Color(255, 224, 130), Color(92, 74, 26))
 private val MARKERS_KEY = Key.create<MutableList<() -> Unit>>("com.ahmedalazaizeh.sessiondiff.markers")
 // What was last actually applied to this editor — lets refreshAllEditorsFor skip clearing and
 // recreating every inlay/highlighter/action-bar on every 3s poll tick when nothing changed, which
@@ -37,10 +38,11 @@ private val SIGNATURE_KEY = Key.create<String>("com.ahmedalazaizeh.sessiondiff.s
  * (ActiveSessionStore) — [refreshAllEditorsFor] re-runs this on every open editor when that changes,
  * since markers are otherwise only computed once, when an editor is created.
  *
- * Renders like GitHub Copilot's inline diff preview: removed/changed lines show as struck-through
- * "ghost" text above the current lines (via a block Inlay), current/changed lines get a green
- * background, and a Keep/Reject/Show Diff action bar (a real embedded Swing panel, not just a
- * gutter icon) sits below each hunk.
+ * A one-line edit renders git `--word-diff` style: only the changed word/phrase gets a highlight,
+ * with the removed word struck through inline right next to it — not a separate ghost line. Multi-line
+ * hunks and pure add/delete fall back to a whole-line treatment (struck-through ghost block above,
+ * highlighted block below). Either way, a Keep/Reject/Show Diff action bar (a real embedded Swing
+ * panel, not just a gutter icon) sits below each hunk.
  */
 class LatestSessionGutterListener : EditorFactoryListener {
 
@@ -160,27 +162,62 @@ class LatestSessionGutterListener : EditorFactoryListener {
                 val hasNewText = fragment.startOffset2 != fragment.endOffset2
                 val disposables = mutableListOf<() -> Unit>()
 
-                if (hasOldText) {
-                    val oldLines = plan.beforeText.substring(fragment.startOffset1, fragment.endOffset1).split("\n")
-                    val ghostInlay = plan.editor.inlayModel.addBlockElement(
-                        fragment.startOffset2, false, true, 0, OldCodeBlockRenderer(oldLines),
-                    )
-                    if (ghostInlay != null) {
-                        disposables.add { ghostInlay.dispose() }
-                        editorWideDisposables.add { ghostInlay.dispose() }
-                    }
-                }
+                // Word-level inline diff (git --word-diff style) only makes sense for a genuine
+                // one-line-to-one-line edit — multi-line hunks and pure add/delete fall back to the
+                // whole-line ghost-block-above + full-line-highlight-below treatment.
+                val isSingleLineModification = hasOldText && hasNewText &&
+                    '\n' !in hunkBaselineText && '\n' !in hunkCurrentText
 
-                if (hasNewText) {
-                    val highlighter = markup.addRangeHighlighter(
-                        fragment.startOffset2,
-                        fragment.endOffset2,
-                        HighlighterLayer.LAST,
-                        TextAttributes(null, NEW_LINE_BACKGROUND, null, null, 0),
-                        HighlighterTargetArea.LINES_IN_RANGE,
+                if (isSingleLineModification) {
+                    val innerFragments = ComparisonManager.getInstance().compareWords(
+                        hunkBaselineText, hunkCurrentText, ComparisonPolicy.DEFAULT, EmptyProgressIndicator(),
                     )
-                    disposables.add { markup.removeHighlighter(highlighter) }
-                    editorWideDisposables.add { markup.removeHighlighter(highlighter) }
+                    innerFragments.forEach { inner ->
+                        val oldWord = hunkBaselineText.substring(inner.startOffset1, inner.endOffset1)
+                        if (oldWord.isNotEmpty()) {
+                            val insertAt = fragment.startOffset2 + inner.startOffset2
+                            val wordInlay = plan.editor.inlayModel.addInlineElement(
+                                insertAt, false, OldWordInlineRenderer(oldWord),
+                            )
+                            if (wordInlay != null) {
+                                disposables.add { wordInlay.dispose() }
+                                editorWideDisposables.add { wordInlay.dispose() }
+                            }
+                        }
+                        if (inner.startOffset2 != inner.endOffset2) {
+                            val highlighter = markup.addRangeHighlighter(
+                                fragment.startOffset2 + inner.startOffset2,
+                                fragment.startOffset2 + inner.endOffset2,
+                                HighlighterLayer.LAST,
+                                TextAttributes(null, WORD_HIGHLIGHT_BACKGROUND, null, null, 0),
+                                HighlighterTargetArea.EXACT_RANGE,
+                            )
+                            disposables.add { markup.removeHighlighter(highlighter) }
+                            editorWideDisposables.add { markup.removeHighlighter(highlighter) }
+                        }
+                    }
+                } else {
+                    if (hasOldText) {
+                        val ghostInlay = plan.editor.inlayModel.addBlockElement(
+                            fragment.startOffset2, false, true, 0, OldCodeBlockRenderer(hunkBaselineText.split("\n")),
+                        )
+                        if (ghostInlay != null) {
+                            disposables.add { ghostInlay.dispose() }
+                            editorWideDisposables.add { ghostInlay.dispose() }
+                        }
+                    }
+
+                    if (hasNewText) {
+                        val highlighter = markup.addRangeHighlighter(
+                            fragment.startOffset2,
+                            fragment.endOffset2,
+                            HighlighterLayer.LAST,
+                            TextAttributes(null, NEW_LINE_BACKGROUND, null, null, 0),
+                            HighlighterTargetArea.LINES_IN_RANGE,
+                        )
+                        disposables.add { markup.removeHighlighter(highlighter) }
+                        editorWideDisposables.add { markup.removeHighlighter(highlighter) }
+                    }
                 }
 
                 val rangeMarker = plan.editor.document.createRangeMarker(fragment.startOffset2, fragment.endOffset2)

@@ -189,6 +189,8 @@ object DiffPresenter {
         if (relpaths.isEmpty()) return
         val index = relpaths.indexOf(relpath).coerceAtLeast(0).coerceAtMost(relpaths.size - 1)
 
+        warnAboutOverlappingSessions(project, projectBasePath, session, relpaths)
+
         sessionDiffFiles[session.sessionId]?.let { FileEditorManager.getInstance(project).closeFile(it) }
 
         val requests = relpaths.mapNotNull { buildRequest(project, session, projectBasePath, it) }
@@ -197,6 +199,38 @@ object DiffPresenter {
         val virtualFile = ChainDiffVirtualFile(chain, session.title)
         sessionDiffFiles[session.sessionId] = virtualFile
         DiffEditorTabFilesManager.getInstance(project).showDiffFile(virtualFile, true)
+    }
+
+    /**
+     * "Before" is this session's own baseline, but "after" is always the live file on disk — if a
+     * later session also touched the same file since, that session's edits are baked into "after"
+     * too, with no way to tell them apart from this session's own. There's no reliable snapshot of
+     * "the file exactly as this session left it" to compare against instead (would need Claude
+     * Code's own checkpoint versioning to expose a per-session end-state, which it doesn't appear
+     * to), so the best honest option is a clear warning rather than a silently misleading diff.
+     */
+    private fun warnAboutOverlappingSessions(project: Project, projectBasePath: String, session: SessionInfo, relpaths: List<String>) {
+        val laterSessions = SessionDiscoveryService.listSessions(projectBasePath)
+            .filter { it.sessionId != session.sessionId && it.startTimeMillis > session.startTimeMillis }
+        if (laterSessions.isEmpty()) return
+
+        val overlapping = relpaths.filter { rp ->
+            val absolutePath = Path(projectBasePath, rp).toString()
+            laterSessions.any { later ->
+                absolutePath in SessionDiscoveryService.touchedFilesIn(later.transcriptPath, projectBasePath) ||
+                    absolutePath in SessionDiscoveryService.bashDeletedFilesIn(later.transcriptPath, projectBasePath)
+            }
+        }
+        if (overlapping.isEmpty()) return
+
+        notify(
+            project,
+            "Diff includes a later session's changes too",
+            "Also touched after this session by another one: ${overlapping.joinToString(", ")}. " +
+                "The diff compares this session's starting point against the file's current content, " +
+                "which includes everything done since — not just this session's own edits.",
+            NotificationType.WARNING,
+        )
     }
 
     private fun buildRequest(project: Project, session: SessionInfo, projectBasePath: String, relpath: String): SimpleDiffRequest? {
