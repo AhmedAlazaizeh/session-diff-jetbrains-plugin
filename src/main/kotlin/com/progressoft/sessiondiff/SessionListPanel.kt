@@ -5,8 +5,8 @@ import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
 import com.intellij.ui.JBColor
-import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import java.awt.BorderLayout
 import java.awt.CardLayout
@@ -25,12 +25,11 @@ import java.util.Date
 import javax.swing.BorderFactory
 import javax.swing.Box
 import javax.swing.BoxLayout
-import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JLabel
+import javax.swing.JMenuItem
 import javax.swing.JPanel
-import javax.swing.ListCellRenderer
-import javax.swing.ListSelectionModel
+import javax.swing.JPopupMenu
 import javax.swing.Scrollable
 import javax.swing.SwingConstants
 import javax.swing.Timer
@@ -51,33 +50,32 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
     private val cardLayout = layout as CardLayout
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm")
 
-    private val sessionListModel = DefaultListModel<SessionInfo>()
-    private val sessionList = JBList(sessionListModel)
-
     // Real per-row panels, not a JList — a ListCellRenderer's component is only ever painted, never
-    // a live child, so buttons inside it would never actually receive clicks.
-    private val filesListContainer = object : JPanel(), Scrollable {
-        override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
-        override fun getScrollableUnitIncrement(visibleRect: Rectangle, orientation: Int, direction: Int) = 16
-        override fun getScrollableBlockIncrement(visibleRect: Rectangle, orientation: Int, direction: Int) = 64
-        override fun getScrollableTracksViewportWidth() = true
-        override fun getScrollableTracksViewportHeight() = false
-    }
+    // a live child, so buttons (Keep/Reject, session "...") inside it would never actually receive clicks.
+    private val sessionsListContainer = verticalListContainer()
+    private val filesListContainer = verticalListContainer()
     private val filesHeaderTitle = JLabel()
     private val filesHeaderSubtitle = JLabel()
     private var currentSession: SessionInfo? = null
+    private var lastRenderedSessions: List<SessionInfo> = emptyList()
+    private var lastRenderedActiveId: String? = null
 
     init {
-        sessionList.selectionMode = ListSelectionModel.SINGLE_SELECTION
-        sessionList.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        sessionList.emptyText.text = "No Claude sessions found for this project"
-        sessionList.cellRenderer = ListCellRenderer<SessionInfo> { _, value, _, isSelected, _ -> sessionCard(value, isSelected) }
-        sessionList.addListSelectionListener { event ->
-            if (!event.valueIsAdjusting) {
-                sessionList.selectedValue?.let { showFilesFor(it) }
-            }
-        }
-        add(JBScrollPane(sessionList), CARD_LIST)
+        val clearAllButton = JButton("Clear All Sessions")
+        clearAllButton.toolTipText = "Remove all sessions from this list (transcripts on disk are untouched)"
+        clearAllButton.addActionListener { clearAllSessions() }
+
+        val listHeader = JPanel(BorderLayout())
+        listHeader.add(clearAllButton, BorderLayout.EAST)
+        listHeader.border = BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Separator.foreground")),
+            BorderFactory.createEmptyBorder(6, 8, 6, 8),
+        )
+
+        val listPanel = JPanel(BorderLayout())
+        listPanel.add(listHeader, BorderLayout.NORTH)
+        listPanel.add(JBScrollPane(sessionsListContainer), BorderLayout.CENTER)
+        add(listPanel, CARD_LIST)
 
         val backButton = JButton(AllIcons.Actions.Back)
         backButton.toolTipText = "Back to sessions"
@@ -101,10 +99,6 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
             BorderFactory.createEmptyBorder(10, 10, 10, 10),
         )
 
-        filesListContainer.layout = BoxLayout(filesListContainer, BoxLayout.Y_AXIS)
-        filesListContainer.isOpaque = true
-        filesListContainer.background = UIManager.getColor("List.background")
-
         val filesPanel = JPanel(BorderLayout())
         filesPanel.add(header, BorderLayout.NORTH)
         filesPanel.add(JBScrollPane(filesListContainer), BorderLayout.CENTER)
@@ -123,10 +117,61 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
     fun refresh() {
         val basePath = project.basePath ?: return
         val sessions = SessionDiscoveryService.listSessions(basePath)
-        val current = (0 until sessionListModel.size()).map { sessionListModel.getElementAt(it) }
-        if (current == sessions) return
-        sessionListModel.clear()
-        sessions.forEach { sessionListModel.addElement(it) }
+        val activeId = SessionDiscoveryService.activeSessionFor(basePath)?.sessionId
+        if (sessions == lastRenderedSessions && activeId == lastRenderedActiveId) return
+        lastRenderedSessions = sessions
+        lastRenderedActiveId = activeId
+
+        sessionsListContainer.removeAll()
+        if (sessions.isEmpty()) {
+            val empty = JLabel("No Claude sessions found for this project", SwingConstants.CENTER)
+            empty.foreground = UIManager.getColor("Label.disabledForeground")
+            empty.border = BorderFactory.createEmptyBorder(20, 0, 20, 0)
+            sessionsListContainer.add(empty)
+        } else {
+            sessions.forEach { session -> sessionsListContainer.add(sessionCard(session, session.sessionId == activeId, basePath)) }
+        }
+        sessionsListContainer.revalidate()
+        sessionsListContainer.repaint()
+    }
+
+    /** "Clear All Sessions" — hides every session from the list. Any file still not fully Keep/Reject'd is
+     * auto-accepted first, so nothing is silently lost; a second confirmation calls that out explicitly. */
+    private fun clearAllSessions() {
+        val basePath = project.basePath ?: return
+        val sessions = SessionDiscoveryService.listSessions(basePath)
+        if (sessions.isEmpty()) return
+
+        val pendingSessions = sessions.filter { session ->
+            DiffPresenter.fileSummaries(project, session).any { it.reviewStatus == FileReviewStatus.PENDING }
+        }
+
+        val firstConfirm = Messages.showYesNoDialog(
+            project,
+            "Remove all ${sessions.size} session(s) from this list?\nTranscripts on disk are untouched.",
+            "Clear All Sessions",
+            Messages.getQuestionIcon(),
+        )
+        if (firstConfirm != Messages.YES) return
+
+        if (pendingSessions.isNotEmpty()) {
+            val secondConfirm = Messages.showYesNoDialog(
+                project,
+                "${pendingSessions.size} session(s) still have changes not yet Kept or Rejected.\n" +
+                    "Clearing will accept all of them. Continue?",
+                "Unreviewed Changes",
+                Messages.getWarningIcon(),
+            )
+            if (secondConfirm != Messages.YES) return
+        }
+
+        sessions.forEach { session ->
+            DiffPresenter.fileSummaries(project, session)
+                .filter { it.reviewStatus == FileReviewStatus.PENDING }
+                .forEach { summary -> DiffPresenter.keepAllPending(project, session, summary.relpath) }
+            ClearedSessions.clear(basePath, session.sessionId)
+        }
+        refresh()
     }
 
     private fun showFilesFor(session: SessionInfo) {
@@ -301,19 +346,10 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
         return row
     }
 
-    private fun sessionCard(session: SessionInfo, isSelected: Boolean): JPanel {
+    private fun sessionCard(session: SessionInfo, isActive: Boolean, projectBasePath: String): JPanel {
         val listBackground = UIManager.getColor("List.background")
-        val foreground = if (isSelected) UIManager.getColor("List.selectionForeground") else UIManager.getColor("List.foreground")
-        val secondaryForeground = if (isSelected) foreground else UIManager.getColor("Label.disabledForeground")
-
-        val card = JPanel()
-        card.layout = BoxLayout(card, BoxLayout.Y_AXIS)
-        card.isOpaque = true
-        card.background = if (isSelected) UIManager.getColor("List.selectionBackground") else listBackground
-        card.border = BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(UIManager.getColor("Separator.foreground"), 1, true),
-            BorderFactory.createEmptyBorder(14, 16, 14, 16),
-        )
+        val foreground = UIManager.getColor("List.foreground")
+        val secondaryForeground = UIManager.getColor("Label.disabledForeground")
 
         val titleLabel = JLabel(session.title)
         titleLabel.font = titleLabel.font.deriveFont(Font.BOLD, titleLabel.font.size2D + 1f)
@@ -330,18 +366,89 @@ class SessionListPanel(private val project: Project) : JPanel(CardLayout()) {
         filesLabel.foreground = secondaryForeground
         filesLabel.alignmentX = 0f
 
-        card.add(titleLabel)
-        card.add(Box.createVerticalStrut(6))
-        card.add(dateLabel)
-        card.add(filesLabel)
+        val textPanel = JPanel()
+        textPanel.isOpaque = false
+        textPanel.layout = BoxLayout(textPanel, BoxLayout.Y_AXIS)
+        textPanel.add(titleLabel)
+        textPanel.add(Box.createVerticalStrut(6))
+        textPanel.add(dateLabel)
+        textPanel.add(filesLabel)
+
+        // Only the active session (the one getting inline editor review) shows a badge; every
+        // other card gets a "..." menu to make itself the active one instead.
+        val eastComponent = if (isActive) {
+            val activeLabel = JLabel("● Active")
+            activeLabel.foreground = KEEP_COLOR
+            activeLabel.font = activeLabel.font.deriveFont(activeLabel.font.size2D - 1f)
+            activeLabel
+        } else {
+            val moreButton = JButton(AllIcons.Actions.More)
+            moreButton.isOpaque = false
+            moreButton.isContentAreaFilled = false
+            moreButton.isBorderPainted = false
+            moreButton.isFocusPainted = false
+            moreButton.toolTipText = "Set as active session"
+            moreButton.addActionListener {
+                val menu = JPopupMenu()
+                val setActiveItem = JMenuItem("Set as Active")
+                setActiveItem.addActionListener {
+                    ActiveSessionStore.set(projectBasePath, session.sessionId)
+                    LatestSessionGutterListener.refreshAllEditorsFor(project)
+                    refresh()
+                }
+                menu.add(setActiveItem)
+                menu.show(moreButton, 0, moreButton.height)
+            }
+            moreButton
+        }
+
+        val card = JPanel(BorderLayout())
+        card.isOpaque = true
+        card.background = listBackground
+        card.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        card.border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(UIManager.getColor("Separator.foreground"), 1, true),
+            BorderFactory.createEmptyBorder(14, 16, 14, 16),
+        )
+        card.add(textPanel, BorderLayout.CENTER)
+        card.add(eastComponent, BorderLayout.EAST)
+
+        // Clicks land on the card itself only when they miss the "..." button (a real child now,
+        // consumes its own clicks) — same pattern as fileRow.
+        card.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                showFilesFor(session)
+            }
+
+            override fun mouseEntered(e: MouseEvent) {
+                card.background = UIManager.getColor("List.selectionBackground")
+            }
+
+            override fun mouseExited(e: MouseEvent) {
+                card.background = listBackground
+            }
+        })
 
         // Margin lives on a separate opaque wrapper (not the card itself) so the gap between
-        // cards always reads as plain list background, never the card's selection highlight.
+        // cards always reads as plain list background, never the card's hover highlight.
         val wrapper = JPanel(BorderLayout())
         wrapper.isOpaque = true
         wrapper.background = listBackground
         wrapper.border = BorderFactory.createEmptyBorder(6, 8, 6, 8)
         wrapper.add(card, BorderLayout.CENTER)
+        wrapper.maximumSize = Dimension(Int.MAX_VALUE, wrapper.preferredSize.height)
         return wrapper
+    }
+
+    private fun verticalListContainer(): JPanel = object : JPanel(), Scrollable {
+        override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+        override fun getScrollableUnitIncrement(visibleRect: Rectangle, orientation: Int, direction: Int) = 16
+        override fun getScrollableBlockIncrement(visibleRect: Rectangle, orientation: Int, direction: Int) = 64
+        override fun getScrollableTracksViewportWidth() = true
+        override fun getScrollableTracksViewportHeight() = false
+    }.apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        isOpaque = true
+        background = UIManager.getColor("List.background")
     }
 }

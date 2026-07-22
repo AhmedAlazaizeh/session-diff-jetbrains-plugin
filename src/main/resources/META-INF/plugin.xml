@@ -1,4 +1,4 @@
-<idea-plugin>
+<idea-plugin require-restart="true">
   <id>com.progressoft.sessiondiff</id>
   <name>Claude Sessions</name>
   <vendor email="ahmad.alazaizeh@progressoft.com">Ahmad Alazaizeh</vendor>
@@ -7,14 +7,23 @@
     never mixed up with your own uncommitted edits.
     <ul>
       <li>Claude Sessions tool window: browse sessions for the current project as cards (title, date, files changed)</li>
-      <li>Per-file change list with +/- line stats, color-coded new/deleted files</li>
-      <li>Native IDE diff view for any file a session touched</li>
-      <li>Inline gutter markers for the latest session, with per-hunk Rollback</li>
+      <li>Per-file change list with +/- line stats, Keep/Reject buttons, color-coded new/deleted files</li>
+      <li>Native multi-file diff view for a session, with Prev/Next to cycle through every touched file</li>
+      <li>Inline Keep/Reject review for the latest session, directly in the editor — GitHub Copilot-style
+          struck-through removed lines and highlighted added lines, not just a diff popup</li>
+      <li>Detects files deleted via Bash <code>rm</code>, not just Edit/Write/NotebookEdit</li>
     </ul>
     Independent of git — works even on files with no baseline in version control.
   ]]></description>
   <change-notes><![CDATA[
     <ul>
+      <li>0.2.3: fixed the tool window stripe icon losing its "+" mark when active/selected; require restart on
+          plugin install/update/uninstall</li>
+      <li>0.2.2: "Clear All Sessions" button, with confirmation before auto-accepting any unreviewed changes;
+          custom tool window stripe icon</li>
+      <li>0.2.1: support 2026.2 (262.*)</li>
+      <li>0.2.0: inline Copilot-style Keep/Reject review in the editor, file-list Keep/Reject buttons,
+          Bash-delete detection, multi-file diff tab with auto-advance on reject</li>
       <li>0.1.0: session cards with titles, per-file diff stats, native diff viewer, inline gutter markers with Rollback for the latest session</li>
     </ul>
   ]]></change-notes>
@@ -27,6 +36,7 @@
     <toolWindow id="Claude Sessions"
                 secondary="true"
                 anchor="left"
+                icon="/icons/toolWindowSessionDiff.svg"
                 factoryClass="com.progressoft.sessiondiff.SessionListToolWindowFactory"/>
     <notificationGroup id="Claude Sessions" displayType="BALLOON"/>
     <editorFactoryListener implementation="com.progressoft.sessiondiff.LatestSessionGutterListener"/>

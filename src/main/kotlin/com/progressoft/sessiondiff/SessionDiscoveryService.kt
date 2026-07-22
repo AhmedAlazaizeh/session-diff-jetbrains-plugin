@@ -25,7 +25,15 @@ object SessionDiscoveryService {
 
         return dir.listDirectoryEntries("*.jsonl")
             .mapNotNull { parseTranscript(it, projectBasePath) }
+            .filter { !ClearedSessions.isCleared(projectBasePath, it.sessionId) }
             .sortedByDescending { it.startTimeMillis }
+    }
+
+    /** The session inline editor review applies to — the user's pinned choice if it still exists, else the latest. */
+    fun activeSessionFor(projectBasePath: String): SessionInfo? {
+        val sessions = listSessions(projectBasePath)
+        val pinnedId = ActiveSessionStore.get(projectBasePath)
+        return sessions.firstOrNull { it.sessionId == pinnedId } ?: sessions.firstOrNull()
     }
 
     /**
